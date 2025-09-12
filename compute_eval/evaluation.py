@@ -97,9 +97,9 @@ def estimate_pass_at_k(
         assert len(num_samples) == len(num_correct)
         num_samples_it = iter(num_samples)
 
-    return np.array(
-        [estimator(int(n), int(c), k) for n, c in zip(num_samples_it, num_correct)]
-    )
+    return np.array([
+        estimator(int(n), int(c), k) for n, c in zip(num_samples_it, num_correct)
+    ])
 
 
 def get_cli_args(problem: Dict[str, Dict]):
@@ -142,9 +142,9 @@ def evaluate_functional_correctness(
 
     # If the user wants to save completions, check that the directory exists
     if save_completions_dir != "":
-        assert os.path.exists(
-            os.path.abspath(save_completions_dir)
-        ), "You must have created the directory where the temporary completions will go"
+        assert os.path.exists(os.path.abspath(save_completions_dir)), (
+            "You must have created the directory where the temporary completions will go"
+        )
 
     problems = read_problems(problem_file)
 
@@ -158,7 +158,18 @@ def evaluate_functional_correctness(
         print("Reading samples...")
         for sample in tqdm.tqdm(stream_jsonl(sample_file)):
             task_id = sample["task_id"]
-            compilable_code = sample["compilable_code"]
+            if "compilable_code" in sample:
+                compilable_code = sample["compilable_code"]
+            else:
+                assert "completion" in sample, (
+                    "Each sample must have either 'compilable_code' or 'completion' field."
+                )
+                completion = sample["completion"]
+                compilable_code = problems[task_id]["declaration"] + "\n\n"
+                compilable_code += "// completion-begin \n"
+                compilable_code += completion + "\n"
+                compilable_code += "// completion-end \n\n"
+                compilable_code += problems[task_id]["test"]
 
             problem = problems[task_id]
 
