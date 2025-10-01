@@ -36,7 +36,6 @@ class OpenAIModel(ModelInterface):
 
         self.model_name = model_name
         self.base_url = base_url
-        self.model_name = model_name
 
     def generate_response(self, system_prompt, prompt, params):
         """

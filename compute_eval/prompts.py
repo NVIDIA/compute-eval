@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict
+from compute_eval.data import Problem
 
 SYSTEM_PROMPT = """You are a CUDA programming expert capable of generating high-quality, efficient CUDA code with best practices, optimized for performance and clarity.
 Instructions:
@@ -33,8 +33,8 @@ Please do not include any additional headers in your response.
 """
 
 
-def extract_header_files_from_problem(problem: Dict) -> str:
-    declaration = problem.get("declaration", "")
+def extract_header_files_from_problem(problem: Problem) -> str:
+    declaration = problem.declaration
     header_files = []
     for header_file in declaration.split("\n"):
         header_file = header_file.strip()
@@ -44,14 +44,10 @@ def extract_header_files_from_problem(problem: Dict) -> str:
     return "\n".join(header_files)
 
 
-def generate_user_prompt(problem: Dict, include_header_files: bool = False) -> str:
+def generate_user_prompt(problem: Problem, include_header_files: bool = False) -> str:
     header_files = extract_header_files_from_problem(problem)
     header_files_prompt = ""
     if include_header_files and header_files:
-        header_files_prompt = HEADER_FILES_PROMPT_TEMPLATE.format(
-            header_files=header_files
-        )
+        header_files_prompt = HEADER_FILES_PROMPT_TEMPLATE.format(header_files=header_files)
 
-    return USER_PROMPT_TEMPLATE.format(
-        user_prompt=problem["prompt"], header_files_prompt=header_files_prompt
-    )
+    return USER_PROMPT_TEMPLATE.format(user_prompt=problem.prompt, header_files_prompt=header_files_prompt)

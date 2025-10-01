@@ -12,37 +12,37 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import gzip
+import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
 
 import tqdm
 
+from compute_eval.models.claude import ClaudeModel
 from compute_eval.models.nim_model import NimModel
 from compute_eval.models.openAI_model import OpenAIModel
-from compute_eval.models.claude import ClaudeModel
 
-from .data import read_problems, write_jsonl
+from .data import Problem, read_problems, stream_jsonl, write_jsonl
 from .prompts import SYSTEM_PROMPT, generate_user_prompt
 
 
 def generate_model_completions(
-    task_id,
-    system_prompt,
-    problem,
-    print_completions,
-    include_header_files,
-    model: Optional[str],
-    model_type: Optional[str],
-    custom_model: Optional[dict] = None,
-    params: Optional[dict] = None,
+    system_prompt: str,
+    problem: Problem,
+    print_completions: bool,
+    include_header_files: bool,
+    model: str | None,
+    model_type: str | None,
+    custom_model: dict | None = None,
+    params: dict | None = None,
 ):
     """
     Orchestrate the generation of code completions using the specified model.
 
     Args:
-        system_prompt (str, optional): The system prompt to use for generating completions.
-        problem (dict): The dictionary containing the problem prompt.
+        system_prompt (str): The system prompt to use for generating completions.
+        problem (Problem): The problem object containing the task details.
         model (str): The name of the model to use for generating completions.
         model_type (str): The type of the model ("instruct" or "base").
         print_completions (bool): Whether to print the completions.
@@ -57,9 +57,7 @@ def generate_model_completions(
     # Means we are invoking a model from the preset list of models
 
     if custom_model is not None:
-        model_instance = OpenAIModel(
-            base_url=custom_model["api_endpoint"], model_name=custom_model["model_id"]
-        )
+        model_instance = OpenAIModel(base_url=custom_model["api_endpoint"], model_name=custom_model["model_id"])
     else:
         model_map = {
             "mixtral-8x22b-v0.1": lambda: NimModel(
@@ -95,36 +93,37 @@ def generate_model_completions(
     prompt = generate_user_prompt(problem, include_header_files=include_header_files)
     completion = model_instance.generate_response(system_prompt, prompt, params)
 
-    cuda_version = problem.get("cuda_version")
-
     if print_completions:
-        if cuda_version is not None:
-            print("CUDA version: " + cuda_version)
+        if hasattr(problem, "cuda_toolkit"):
+            print(f"CUDA toolkit: {problem.cuda_toolkit}")
         print("=" * 30)
 
-        print(problem["task_id"] + "\n")
+        print(problem.task_id + "\n")
         print(f"=== Prompt ===\n{prompt}\n")
 
     if model_type == "instruct":
         # we need to parse the completion to get the code
         # first, check whether the declaration provides the function signature
         drop_signature = False
-        declaration = problem.get("declaration", "")
+        # TODO: TBD on improving this logic
+        declaration = problem.declaration
         if declaration.strip().endswith("{"):
             drop_signature = True
 
-        completion = parse_function_body(completion, drop_signature=drop_signature)
+        function_body = parse_function_body(completion, drop_signature=drop_signature)
+    else:
+        function_body = completion
 
     if print_completions:
         print(f"=== Completion ===\n{completion}\n")
 
-    result = problem["declaration"] + "\n\n"
+    result = problem.declaration + "\n\n"
     result = result + "// completion-begin \n"
-    result = result + completion + "\n"
+    result = result + function_body + "\n"
     result = result + "// completion-end \n\n"
-    result = result + problem["test"]
+    result = result + problem.test
 
-    return (task_id, result, completion, prompt)
+    return problem.task_id, result, completion, prompt
 
 
 def parse_function_body(input_string, drop_signature: bool = True):
@@ -133,52 +132,34 @@ def parse_function_body(input_string, drop_signature: bool = True):
 
     Args:
         input_string (str): The response string from the model.
-        signature_provided (bool): Whether the function signature is provided in the response.
+        drop_signature (bool): Whether to remove the function signature. Default is True.
 
     Returns:
-        str: The extracted code lines.
+        str: The extracted function body, or the original string if no code fences are found.
     """
-    lines = input_string.splitlines()
-    start_index = None
-    end_index = None
 
-    # Find the indices for start and end of code block
-    for i, line in enumerate(lines):
-        if "```" in line.strip():
-            if start_index is None:
-                start_index = i + 1  # start index is the line after "```"
-            else:
-                end_index = i
-                break
+    # Regular expression to find code fences and extract the code between them
+    fence_pattern = re.compile(r"```\s*[a-zA-Z]*\s*\n(.*?)```", re.DOTALL)
+    fence_matches = fence_pattern.findall(input_string)
 
-    if start_index is None or end_index is None or start_index >= end_index:
-        return input_string.strip()  # No code block found or empty code block
+    if len(fence_matches) == 0:
+        return input_string.strip()  # Return the original input if no code fences are found
 
-    # Extract the code between the markers
-    code = lines[start_index:end_index]
+    # Use the code block from the first code fence found
+    code_block = fence_matches[0].strip()
 
-    final_start_index = 0
+    if not drop_signature:
+        return code_block
 
-    # if the signature is provided, remove it
-    if drop_signature:
-        # Handle special keywords
-        special_keywords = ("__global__", "__device__", "void")
-        for i, line in enumerate(code):
-            if any(keyword in line for keyword in special_keywords):
-                final_start_index = i + 1
-                break
+    # Regular expression to match the function body
+    body_pattern = re.compile(r"{(.*)}", re.DOTALL)
+    body_match = body_pattern.search(code_block)
 
-        # Remove opening brace line if present
-        while final_start_index < len(code) and code[final_start_index].strip() in (
-            "{",
-            "",
-        ):
-            final_start_index += 1
-
-    # Extract the function body lines
-    function_body_lines = code[final_start_index:]
-
-    return "\n".join(function_body_lines)
+    if body_match:
+        function_body = body_match.group(1)
+        return function_body + "\n}"
+    else:
+        return code_block
 
 
 def generate_samples(
@@ -186,32 +167,44 @@ def generate_samples(
     sample_file: str = "generated_samples.jsonl",
     num_samples_per_problem: int = 100,
     n_workers: int = 20,
-    system_prompt: Optional[str] = SYSTEM_PROMPT,
+    system_prompt: str | None = SYSTEM_PROMPT,
     print_completions: bool = False,
     include_header_files: bool = False,
-    model: Optional[str] = "llama-3.1-70b-instruct",
-    model_type: Optional[str] = "instruct",
-    custom_model: Optional[dict] = None,
-    params: Optional[dict] = None,
+    model: str | None = "llama3.1-70b",
+    model_type: str | None = "instruct",
+    custom_model: dict | None = None,
+    params: dict | None = None,
+    temp_dir: str | None = None,
 ):
     """Generates `n_samples_per_problem` number of completions for each of the problems in the
     problem file and then writes them out to the samples.jsonl file provided.
     """
 
-    # the number of samples generated per problem must be at least as much as the most k for pass k
+    def _task_id_to_filename(directory: str, task_id: str) -> str:
+        return f"{directory}/{task_id.replace('/', '_')}.jsonl"
+
+    if temp_dir is None:
+        temp_dir = model if model else "temp_results"
+
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+
     problems = read_problems(problem_file)
+    task_count = {p.task_id: _count_lines(_task_id_to_filename(temp_dir, p.task_id)) for p in problems}
 
     print("Started generating the model completions")
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = []
-        # results is the list of dictionaries that will be serialized into the final JSONL file
-        results = []
+        for problem in problems:
+            existing_sample_count = task_count.get(problem.task_id, 0)
+            samples_to_generate = num_samples_per_problem - existing_sample_count
 
-        # for each problem, generate `num_samples` completions using the thread pool futures
-        for task_id, problem in problems.items():
-            for _ in range(num_samples_per_problem):
+            if samples_to_generate <= 0:
+                print(f"Skipping {problem.task_id}, already have {existing_sample_count} samples")
+                continue
+
+            for _ in range(samples_to_generate):
                 args = (
-                    task_id,
                     system_prompt,
                     problem,
                     print_completions,
@@ -226,19 +219,56 @@ def generate_samples(
 
         print("Waiting for all the model completions")
         for future in tqdm.tqdm(as_completed(futures), total=len(futures)):
-            result = future.result()
-            results.append(
-                {
+            try:
+                result = future.result()
+                task_id = result[0]
+                result_data = {
                     "task_id": result[0],
                     "compilable_code": result[1],
                     "generated_completion": result[2],
                     "prompt": result[3],
                 }
-            )
+                write_jsonl(
+                    filename=_task_id_to_filename(temp_dir, task_id),
+                    data=[result_data],
+                    append=True,
+                )
+            except Exception as e:
+                print(f"Error processing future: {e}")
 
-    results = sorted(results, key=lambda x: x["task_id"])
-    print("Writing the samples to the specified output JSONL file")
-    write_jsonl(sample_file, results)
-    print(
-        "Completed generating all the samples for the problems. Written to the samples JSONL file"
-    )
+    all_results = []
+    for task_file in sorted(os.listdir(temp_dir)):
+        task_file_path = os.path.join(temp_dir, task_file)
+        all_results.extend(stream_jsonl(task_file_path))
+
+    if len(all_results) != len(problems) * num_samples_per_problem:
+        print(f"Error: Expected {len(problems) * num_samples_per_problem} samples, but got {len(all_results)}")
+        raise ValueError("Sample generation incomplete")
+
+    write_jsonl(sample_file, all_results)
+
+    # Clean up temporary files
+    for task_file in os.listdir(temp_dir):
+        os.remove(os.path.join(temp_dir, task_file))
+    os.rmdir(temp_dir)
+
+    print("Completed generating all the samples for the problems. Written to the samples JSONL file")
+
+
+def _count_lines(filename: str) -> int:
+    """
+    Counts the number of lines in a file
+    """
+    if not os.path.exists(filename):
+        return 0
+
+    count = 0
+    if filename.endswith(".gz"):
+        with open(filename, "rb") as gzfp, gzip.open(gzfp, "rt") as fp:
+            for _ in fp:
+                count += 1
+    else:
+        with open(filename, "r") as fp:
+            for _ in fp:
+                count += 1
+    return count

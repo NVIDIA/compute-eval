@@ -24,7 +24,7 @@ aspects of CUDA development.
 
 Install the package:
 
-```
+```bash
 # pip
 pip install .
 
@@ -64,7 +64,7 @@ then:
 export OPENAI_API_KEY="<your-openai-key>"
 ```
 
-#### Anthorpic (Claude)
+#### Anthropic (Claude)
 
 Follow instruction on [Anthropic docs](https://www.anthropic.com/api), then:
 
@@ -144,7 +144,7 @@ Now you have a `data/samples.jsonl`.
 To launch an evaluation on the generated samples create a config file
 where the content of `example_config_evalcorrectness.yaml`:
 
-```
+```yaml
 sample_file: data/samples.jsonl
 problem_file: data/cuda_problems_121924.jsonl
 
@@ -157,6 +157,10 @@ compute_eval evaluate_functional_correctness -config_file=example_config_evalcor
 
 Note: the program will ask you to allow code execution by adding the `--allow-execution` flag.
 
+```bash
+compute_eval evaluate_functional_correctness -config_file=example_config_evalcorrectness.yaml --allow-execution
+```
+
 - This will read the problems and the sample file
 - It will run each of the samples through a functional correctness testing suite
 - It will output a `pass@k` dictionary with 2 `pass@k` values for k = 1 nand k = 3
@@ -166,7 +170,7 @@ Caveats:
 - The `k` argument for `evaluate_functional_correctness` should be a comma-separated e.g., `[1,10]`.
 - Note that if you have a list of `k` that you want used in evaluation, then `max(k) <= num_samples_per_problem` else that `k` value will not show up in the pass@k dict generated.
 
-## Command docs
+## Command Documentation
 
 ### `generate_samples`
 
@@ -183,7 +187,7 @@ This command generates samples for given problems using a specified model and wr
 - `print_completions` (bool, optional): Flag to specify if you want the completions printed to stdout. (default: False)
 - `model` (str, optional): The model to use for generating samples (default: "llama3.1-70b").
 - `model_type` (str, optional): The type of model (default: "instruct").
-- `custom_model`(dict, optional): api_endpoint (base url) and model_id (model name) for any model that uses the OpenAI API. Please use the OPENAI_API_KEY to set your credentials when using a custom model.
+- `custom_model` (dict, optional): api_endpoint (base url) and model_id (model name) for any model that uses the OpenAI API. Please use the OPENAI_API_KEY to set your credentials when using a custom model.
 - `params` (dict, optional): parameters for the chat completions request - temperature, top_p, max_tokens.
 
 ### `evaluate_functional_correctness`

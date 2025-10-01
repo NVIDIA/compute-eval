@@ -43,29 +43,34 @@ import io
 import multiprocessing
 import os
 import platform
-import re
 import signal
 import subprocess
 import tempfile
 import threading
-import time
-from typing import Callable, Dict, Iterable, Optional, Tuple
+from collections.abc import Iterable
 
 import psutil
 
+from compute_eval.data import (
+    CProblem,
+    EvaluatedSample,
+    Problem,
+    Sample,
+)
 
 def compile_cuda_file(
     cuda_file_path: str,
     output_binary_path: str,
-    timeout: int,
-    cli_args: Optional[str] = None,
-) -> Tuple[str, str]:
+    timeout: float,
+    cli_args: str | None = None,
+) -> tuple[str, str]:
     """Compiles the given CUDA file into the given output binary location.
 
     Args:
         cuda_file_path (str): the path to the CUDA file to be compiled
         output_binary_path (str): the path of the binary file that will be generated
         timeout (int): max time in seconds to let the compilation take place for.
+        cli_args (str | None, optional): additional command line arguments to pass to nvcc. Defaults to None.
 
     Returns:
         Tuple[str, str]: 0th index is passed / failed, 1st index is more information.
@@ -81,15 +86,15 @@ def compile_cuda_file(
         )
 
         if proc.returncode == 0:
-            return ("passed", output_binary_path)
+            return "passed", output_binary_path
         else:
             # Return code 127 means command being executed was not found
             if proc.returncode == 127:
                 print("nvcc not found. Please check CUDA installation & PATH.")
-            return ("failed", proc.stderr.decode())
+            return "failed", proc.stderr.decode()
     except Exception as e:
         print("failed")
-        return ("failed", str(e))
+        return "failed", str(e)
 
 
 def execute_binary(binary_file_path: str, cuda_file_path: str, timeout: float) -> str:
@@ -152,16 +157,12 @@ def safe_execution_environment(timeout: float):
             os.chdir = chdir
 
 
-def unsafe_execute(
-    timeout: float,
-    result: Iterable,
-    completion: str,
-    cli_args: str,
-    problem: Dict,
-    completion_id: int,
-):
+def unsafe_execute(problem: Problem, timeout: float, result: Iterable, compilable_code: str):
+    if not isinstance(problem, CProblem):
+        result.append(f"skipped")
+        return
+
     with safe_execution_environment(timeout):
-        res = None
         try:
             # Create temporary directories for the intermediate files
             temp_dir = tempfile.mkdtemp(prefix="compute_eval_")
@@ -170,17 +171,18 @@ def unsafe_execute(
             os.makedirs(binary_dir, exist_ok=True)
 
             # Construct file name
-            file_name = f"{problem['task_id'].replace('/', '_')}-{completion_id}"
+            file_name = f"{problem.task_id.replace('/', '_')}"
 
+            
             # Create a temporary CUDA file path and the binary file path
             cuda_file_path = os.path.join(temp_dir, f"{file_name}.cu")
             binary_file_path = os.path.join(binary_dir, f"{file_name}")
 
             # Write the program
             with open(cuda_file_path, "w") as cuda_file:
-                cuda_file.write(completion)
+                cuda_file.write(compilable_code)
 
-            res = compile_cuda_file(cuda_file_path, binary_file_path, timeout, cli_args)
+            res = compile_cuda_file(cuda_file_path, binary_file_path, timeout, problem.cli_args())
             if res[0] != "passed":
                 result.append(f"Failed to compile! Error: {res[1]}")
                 return
@@ -190,43 +192,35 @@ def unsafe_execute(
             # Execute the binary
             res = execute_binary(binary_file_path, cuda_file_path, timeout)
             result.append(res)
+            
+
         except TimeoutException:
             result.append("Timed out of CUDA program")
         except BaseException as e:
             result.append(f"failed: {e} CUDA program")
 
 
-@contextlib.contextmanager
-def catchtime() -> Callable[[], float]:
-    t1 = t2 = time.perf_counter()
-    yield lambda: t2 - t1
-    t2 = time.perf_counter()
-
-
 def check_correctness(
-    problem: Dict,
-    completion: str,
+    problem: Problem,
+    sample: Sample,
     timeout: float,
-    completion_id: Optional[int] = None,
-    cli_args: Optional[str] = None,
-    cuda_version: Optional[str] = None,
-) -> Dict:
+) -> EvaluatedSample:
     """Evaluates the functional correctness of a completion by running the test
-        suite provided in the problem.
+    suite provided in the problem.
 
     Args:
-        problem (Dict): the problem dictionary
-        completion (str): the entire generated code
-        timeout (float): max time in seconds to let the program run for
+        problem (Problem): The problem we are evaluating.
+        sample (Sample): The sample we are evaluating.
+        timeout (float): Maximum time in seconds to let the program run.
 
     Returns:
-        Dict: the output dictionary with the result of the
+        EvaluatedSample: Information about the correctness, including whether it passed or failed.
     """
 
     manager = multiprocessing.Manager()
     result = manager.list()
 
-    args = [timeout, result, completion, cli_args, problem, completion_id]
+    args = [problem, timeout, result, sample.compilable_code]
     p = multiprocessing.Process(target=unsafe_execute, args=args)
     p.start()
     p.join(timeout=timeout + 1)
@@ -236,14 +230,56 @@ def check_correctness(
         # Kill the parent process
         p.kill()
     if not result:
-        result.append("Timed out of CUDA program")
-    result_status = result[0]
-    return dict(
-        task_id=problem["task_id"],
-        passed=result_status == "passed",
-        skipped=result_status == "skipped",
+        result.append(f"Timed out of {problem.problem_type()} program")
+
+    return EvaluatedSample(
+        sample=sample,
+        skipped=result[0] == "skipped",
+        passed=result[0] == "passed",
         result=result[0],
-        completion_id=completion_id,
+    )
+
+
+def calculate_cuda_execution_speed(
+    problem: Problem,
+    sample: Sample,
+    timeout: float,
+) -> EvaluatedSample:
+    """Evaluates speedup metrics of a completion by timing the execution of the test
+        suite provided in the problem.
+
+    Args:
+        problem (Problem): The problem we are evaluating.
+        sample (Sample): The sample we are evaluating.
+        timeout (float): Maximum time in seconds to let the program run.
+
+    Returns:
+        EvaluatedSample: Information about the correctness, including whether it passed or failed.
+    """
+
+    manager = multiprocessing.Manager()
+    result = manager.list()
+
+    args = [problem, timeout, result, sample.compilable_code]
+    p = multiprocessing.Process(target=unsafe_execute, args=args)
+    p.start()
+    p.join(timeout=timeout + 1)
+    if p.is_alive():
+        p.kill()
+
+    if not result:
+        result.append(("failed", timeout, None))
+
+    if result[0][1] != "passed":
+        result_status, elapsed_time, ncu_metrics = "failed", timeout, None
+    else:
+        result_status, elapsed_time, ncu_metrics = result[0]
+
+    return EvaluatedSample(
+        sample=sample,
+        skipped=result_status == "skipped",
+        passed=result_status == "passed",
+        result=result[0],
     )
 
 
@@ -276,17 +312,14 @@ def time_limit(seconds: float):
 @contextlib.contextmanager
 def swallow_io():
     stream = WriteOnlyStringIO()
-    with contextlib.redirect_stdout(stream):
-        with contextlib.redirect_stderr(stream):
-            with redirect_stdin(stream):
-                yield
+    with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream), redirect_stdin(stream):
+        yield
 
 
 @contextlib.contextmanager
 def create_tempdir():
-    with tempfile.TemporaryDirectory() as dirname:
-        with chdir(dirname):
-            yield dirname
+    with tempfile.TemporaryDirectory() as dirname, chdir(dirname):
+        yield dirname
 
 
 class TimeoutException(Exception):
@@ -297,13 +330,13 @@ class WriteOnlyStringIO(io.StringIO):
     """StringIO that throws an exception when it's read from"""
 
     def read(self, *args, **kwargs):
-        raise IOError
+        raise OSError
 
     def readline(self, *args, **kwargs):
-        raise IOError
+        raise OSError
 
     def readlines(self, *args, **kwargs):
-        raise IOError
+        raise OSError
 
     def readable(self, *args, **kwargs):
         """Returns True if the IO object can be read."""
@@ -329,7 +362,7 @@ def chdir(root):
         os.chdir(cwd)
 
 
-def reliability_guard(maximum_memory_bytes: Optional[int] = None):
+def reliability_guard(maximum_memory_bytes: int | None = None):
     """
     This disables various destructive functions and prevents the generated code
     from interfering with the test (e.g. fork bomb, killing other processes,
@@ -345,16 +378,10 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None):
     if maximum_memory_bytes is not None:
         import resource
 
-        resource.setrlimit(
-            resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes)
-        )
-        resource.setrlimit(
-            resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes)
-        )
-        if not platform.uname().system == "Darwin":
-            resource.setrlimit(
-                resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes)
-            )
+        resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
+        resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
+        if platform.uname().system != "Darwin":
+            resource.setrlimit(resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes))
 
     faulthandler.disable()
 
@@ -418,16 +445,19 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None):
 def kill_descendants(pid):
     try:
         parent = psutil.Process(pid)
+        if not parent.is_running():
+            # The process might have already been terminated
+            return
+
+        # Find all children recursively
+        children = parent.children(recursive=True)
+
+        # Terminate all child processes
+        for child in children:
+            # The process might have already been terminated
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.kill()
+
     except psutil.NoSuchProcess:
-        # The process might have already been terminated
+        # The parent process might have already been terminated
         return
-
-    # Find all children recursively
-    children = parent.children(recursive=True)
-
-    # Terminate all child processes
-    for child in children:
-        try:
-            child.kill()
-        except psutil.NoSuchProcess:
-            pass  # The process might have already been terminated

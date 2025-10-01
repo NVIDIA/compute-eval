@@ -38,20 +38,19 @@
 # THE SOFTWARE.
 
 import itertools
+import json
 import os
-import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple
 
 import numpy as np
 import tqdm
-from tabulate import tabulate
 
 from compute_eval.data import (
+    EvaluatedSample,
     read_problems,
-    stream_jsonl,
-    write_completions_to_dir,
+    stream_samples,
     write_jsonl,
 )
 from compute_eval.execution import check_correctness
@@ -75,13 +74,23 @@ In order to execute this code you must explicitly pass the --allow-execution fla
 
 
 def estimate_pass_at_k(
-    num_samples: Union[int, List[int], np.ndarray],
-    num_correct: Union[List[int], np.ndarray],
+    num_samples: int | list[int] | np.ndarray,
+    num_correct: list[int] | np.ndarray,
     k: int,
 ) -> np.ndarray:
     """
     Estimates pass@k of each problem and returns them in an array.
+
+    Args:
+        num_samples: Number of samples for each problem
+        num_correct: Number of correct samples for each problem
+        k: The k value for pass@k calculation
+
+    Returns:
+        Array of pass@k estimates for each problem
     """
+    if k <= 0:
+        raise ValueError("k must be positive")
 
     def estimator(n: int, c: int, k: int) -> float:
         """
@@ -97,105 +106,104 @@ def estimate_pass_at_k(
         assert len(num_samples) == len(num_correct)
         num_samples_it = iter(num_samples)
 
-    return np.array(
-        [estimator(int(n), int(c), k) for n, c in zip(num_samples_it, num_correct)]
-    )
-
-
-def get_cli_args(problem: Dict[str, Dict]):
-    cc_flags = problem.get("cc_flags")
-    ld_flags = problem.get("ld_flags")
-
-    cli_args = ""
-    if cc_flags is not None:
-        cli_args += " " + cc_flags
-    if ld_flags is not None:
-        cli_args += " " + ld_flags
-
-    return cli_args
+    return np.array([estimator(int(n), int(c), k) for n, c in zip(num_samples_it, num_correct, strict=False)])
 
 
 def evaluate_functional_correctness(
     sample_file: str,
     problem_file: str,
     allow_execution: bool = False,
-    k: Tuple[int] = (1, 10, 100),
+    k: tuple[int] = (1, 10, 100),
     n_workers: int = 4,
     timeout: float = 60.0,
-    save_completions_dir: str = "",
+    results_file: str | None = None,
 ):
     """
-    Evaluates the functional correctness of generated samples, and writes
-    results to f"{sample_file}_correctness_results.jsonl".
+    Evaluates the functional correctness of generated samples and writes results.
+
+    Args:
+        sample_file (str): Path to the sample file.
+        problem_file (str): Path to the problem file.
+        allow_execution (bool): Whether to allow execution of untrusted code.
+        k (Tuple[int]): Tuple of k values for evaluation.
+        n_workers (int): Number of worker threads.
+        timeout (float): Timeout for each task in seconds.
+        results_file (str | None): Path to the output results file. If None, defaults to sample_file with '_correctness_results.jsonl' suffix.
+
+    Returns:
+        None
     """
 
     if not allow_execution:
-        print(WARNING_MSG)
-        sys.exit(1)
+        raise RuntimeError(WARNING_MSG)
 
     # Check if only one k value was passed in (as an integer)
-    if isinstance(k, int):
-        k_vals = [k]
-    else:
-        # Multiple k values (tuple) is converted to a list of int
-        k_vals = list(k)
-
-    # If the user wants to save completions, check that the directory exists
-    if save_completions_dir != "":
-        assert os.path.exists(
-            os.path.abspath(save_completions_dir)
-        ), "You must have created the directory where the temporary completions will go"
+    # Multiple k values (tuple) is converted to a list of int
+    k_vals = [k] if isinstance(k, int) else list(k)
 
     problems = read_problems(problem_file)
+    keyed_problems = {p.task_id: p for p in problems}
 
     # Check the generated samples against test suites.
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = []
-        completion_id = Counter()
-        n_samples = 0
-        results = defaultdict(list)
+        results: list[EvaluatedSample] = []
 
         print("Reading samples...")
-        for sample in tqdm.tqdm(stream_jsonl(sample_file)):
-            task_id = sample["task_id"]
-            compilable_code = sample["compilable_code"]
+        samples = list(stream_samples(sample_file))
 
-            problem = problems[task_id]
+        # Verify that each problem is attempted at least once
+        task_ids = set(p.task_id for p in problems)
+        test_ids = set(s.task_id for s in samples)
+        missing_ids = task_ids - test_ids
+        if missing_ids:
+            raise ValueError(f"The following task_ids are missing in the samples: {missing_ids}")
 
-            cli_args = get_cli_args(problem)
+        for sample in tqdm.tqdm(samples):
+            task_id = sample.task_id
+            problem = keyed_problems.get(task_id)
 
-            cuda_version = problem.get("cuda_version")
-
-            args = (
-                problem,
-                compilable_code,
-                timeout,
-                completion_id[task_id],
-                cli_args,
-                cuda_version,
-            )
+            args = (problem, sample, timeout)
             future = executor.submit(check_correctness, *args)
             futures.append(future)
-            completion_id[task_id] += 1
-            n_samples += 1
-
-        # make sure that solved all the problems (at least once)
-        assert len(completion_id) == len(problems), "Some problems are not attempted."
 
         for future in tqdm.tqdm(as_completed(futures), total=len(futures)):
-            result = future.result()
-            results[result["task_id"]].append((result["completion_id"], result))
+            results.append(future.result())
 
+    pass_at_k = estimate_metrics(results, k_vals)
+    write_metrics(
+        results,
+        pass_at_k,
+        results_file or os.path.splitext(sample_file)[0] + "_correctness_results.jsonl",
+    )
+
+
+def estimate_metrics(results: list[EvaluatedSample], k_vals: list[int]) -> dict[str, float]:
+    """
+    Estimates the metrics for the given problem.
+
+    Args:
+        results (List[EvaluatedSample]): List of evaluated samples.
+        k_vals (List[int]): List of k values for evaluation.
+
+    Returns:
+        Dict[str, float]: A dictionary containing the estimated metrics.
+    """
     # Calculate pass@k.
     total, correct = [], []
-    for result in results.values():
-        result.sort()
-        passed = [r[1]["passed"] for r in result if not r[1]["skipped"]]
+
+    # Group results by task_id
+    results_by_task = defaultdict(list)
+    for result in results:
+        results_by_task[result.task_id].append(result)
+
+    for task_id, results in results_by_task.items():
+        passed = [r.passed for r in results if not r.skipped]
 
         # If all test cases are skipped, we skip the problem.
         if len(passed) == 0:
             print(
-                f"Skipping problem {result[0][1]['task_id']}, it would be ignored while calculating pass@k. Possible reasons maybe incompatible GPU architecture."
+                f"Skipping problem {task_id}, it would be ignored while calculating pass@k. Possible reasons maybe incompatible GPU architecture."
             )
             continue
         total.append(len(passed))
@@ -203,31 +211,32 @@ def evaluate_functional_correctness(
     total = np.array(total)
     correct = np.array(correct)
 
-    pass_at_k = {
-        f"pass@{k}": estimate_pass_at_k(total, correct, k).mean()
-        for k in k_vals
-        if (total >= k).all()
-    }
+    return {f"pass@{k}": estimate_pass_at_k(total, correct, k).mean() for k in k_vals if (total >= k).all()}
 
+
+def write_metrics(
+    results: list[EvaluatedSample],
+    pass_at_k: dict[str, float],
+    results_file: str,
+) -> None:
+    """
+    Writes the metrics to a file and prints consolidated output.
+
+    Args:
+        results (list[EvaluatedSample]): List of evaluated samples.
+        pass_at_k (Dict[str, float]): Pass@k metrics.
+        results_file (str): Path to the output results file.
+
+    Returns:
+        None
+    """
     # Finally, save the results in one file:
-    sample_results = []
-    for sample in stream_jsonl(sample_file):
-        task_id = sample["task_id"]
-        result = results[task_id].pop(0)
-        sample["result"] = result[1]["result"]
-        sample["skipped"] = result[1]["skipped"]
-        sample["passed"] = result[1]["passed"]
-        sample["completion_id"] = result[1]["completion_id"]
-        sample_results.append(sample)
+    print(f"Writing results to {results_file}...")
+    write_jsonl(results_file, (r.__dict__ for r in results))
 
-    out_file = (
-        os.path.splitext(os.path.basename(sample_file))[0]
-        + "_correctness_results.jsonl"
-    )
-    print(f"Writing results to {out_file}...")
-    write_jsonl(out_file, sample_results)
-
-    if save_completions_dir != "":
-        print(f"Saving the completions to {os.path.abspath(save_completions_dir)}...")
-        write_completions_to_dir(save_completions_dir, sample_results)
-    print(pass_at_k)
+    # Output structured JSON to stdout
+    output = {
+        "pass_at_k": {k: float(v) for k, v in pass_at_k.items()},
+        "problem_count": len(set(r.task_id for r in results)),
+    }
+    print(json.dumps(output, indent=2))

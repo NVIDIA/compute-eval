@@ -40,25 +40,113 @@
 import gzip
 import json
 import os
-from typing import Dict, Iterable
-
-ROOT = os.path.dirname(os.path.abspath(__file__))
-
-
-def read_problems(evalset_file: str) -> Dict[str, Dict]:
-    return {task["task_id"]: task for task in stream_jsonl(evalset_file)}
+from abc import ABC, abstractmethod
+from collections.abc import Iterable
+from dataclasses import dataclass, fields
 
 
-def stream_jsonl(filename: str) -> Iterable[Dict]:
+def _construct(instance, **kwargs):
+    for key, value in kwargs.items():
+        if key in {f.name for f in fields(instance)}:
+            setattr(instance, key, value)
+
+
+@dataclass
+class Problem(ABC):
+    task_id: str
+    prompt: str
+    declaration: str
+    test: str
+    example_test: str
+    solution: str | None = None
+
+    @abstractmethod
+    def problem_type(self) -> str:
+        pass
+
+
+@dataclass
+class CProblem(Problem):
+    cc_flags: str | None = None
+    ld_flags: str | None = None
+    cuda_toolkit: str | None = None
+
+    def __init__(self, **kwargs):
+        _construct(self, **kwargs)
+
+    def problem_type(self) -> str:
+        return "CUDA"
+
+    def cli_args(self) -> str:
+        cli_args = ""
+        if self.cc_flags is not None:
+            cli_args += " " + self.cc_flags
+        if self.ld_flags is not None:
+            cli_args += " " + self.ld_flags
+
+        return cli_args
+
+@dataclass
+class Sample:
+    task_id: str
+    sample_idx: int
+    compilable_code: str
+
+    prompt: str = ""
+    generated_completion: str = ""
+
+    def __init__(self, **kwargs):
+        _construct(self, **kwargs)
+
+
+@dataclass
+class EvaluatedSample(Sample):
+    skipped: bool = True
+    passed: bool = False
+    elapsed_time: float = -1.0
+    result: str = ""
+
+    def __init__(
+        self,
+        sample: Sample,
+        skipped: bool,
+        passed: bool,
+        elapsed_time: float = -1.0,
+        result: str = "",
+    ):
+        super().__init__(**sample.__dict__)
+        self.skipped = skipped
+        self.passed = passed
+        self.elapsed_time = elapsed_time
+        self.result = result
+
+
+def read_problems(file_path: str) -> list[Problem]:
+    problems = []
+    with open(file_path, "r") as file:
+        for line in file:
+            data = json.loads(line)
+            problem_type = data.get("type", "c_problem")
+            if problem_type == "c_problem":
+                problems.append(CProblem(**data))
+
+    return problems
+
+
+def stream_samples(filename: str) -> Iterable[Sample]:
+    for index, item in enumerate(stream_jsonl(filename)):
+        yield Sample(sample_idx=index, **item)
+
+
+def stream_jsonl(filename: str) -> Iterable[dict]:
     """
     Parses each jsonl line and yields it as a dictionary
     """
     if filename.endswith(".gz"):
-        with open(filename, "rb") as gzfp:
-            with gzip.open(gzfp, "rt") as fp:
-                for line in fp:
-                    if any(not x.isspace() for x in line):
-                        yield json.loads(line, strict=False)
+        with open(filename, "rb") as gzfp, gzip.open(gzfp, "rt") as fp:
+            for line in fp:
+                if any(not x.isspace() for x in line):
+                    yield json.loads(line, strict=False)
     else:
         with open(filename, "r") as fp:
             for line in fp:
@@ -66,44 +154,17 @@ def stream_jsonl(filename: str) -> Iterable[Dict]:
                     yield json.loads(line, strict=False)
 
 
-def write_completions_to_dir(dir_path: str, data: Iterable[Dict]):
-    """
-    Writes the prompt, pass / fail and the completion of each provided sample
-    to a specific directory.
-
-    REQUIRES: Each dict in the data iterable must have the keys "prompt",
-    "completion", "completion_id" and "passed".
-    """
-
-    full_dir_path = os.path.abspath(dir_path)
-    for sample in data:
-        passed_string = "// " + ("PASSED" if sample["passed"] else "FAILED")
-        prompt = sample["prompt"]
-        file_path = os.path.join(
-            full_dir_path,
-            f"{sample['task_id'].replace('/', '_')}__{sample['completion_id']}.cu",
-        )
-        with open(file_path, "w+") as outfile:
-            outfile.write(passed_string + "\n")
-            outfile.write("/*\n" + prompt + "\n*/\n")
-            outfile.write(sample["compilable_code"])
-
-
-def write_jsonl(filename: str, data: Iterable[Dict], append: bool = False):
+def write_jsonl(filename: str, data: Iterable[dict], append: bool = False):
     """
     Writes an iterable of dictionaries to jsonl
     """
-    if append:
-        mode = "ab"
-    else:
-        mode = "wb"
+    mode = "ab" if append else "wb"
     filename = os.path.expanduser(filename)
     if filename.endswith(".gz"):
-        with open(filename, mode) as fp:
-            with gzip.GzipFile(fileobj=fp, mode="wb") as gzfp:
-                for x in data:
-                    if x:
-                        gzfp.write((json.dumps(x) + "\n").encode("utf-8"))
+        with open(filename, mode) as fp, gzip.GzipFile(fileobj=fp, mode="wb") as gzfp:
+            for x in data:
+                if x:
+                    gzfp.write((json.dumps(x) + "\n").encode("utf-8"))
     else:
         with open(filename, mode) as fp:
             for x in data:
