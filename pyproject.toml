@@ -6,39 +6,55 @@ readme = "README.md"
 authors = [
     { name = "NVIDIA" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "anthropic>=0.42.0",
-    "fire>=0.7.0",
-    "numpy>=2.2.0",
-    "openai>=1.58.1",
-    "pre-commit>=4.0.1",
-    "psutil>=6.1.1",
-    "python-dotenv>=1.0.1",
-    "requests>=2.32.3",
+    "anthropic>=0.72.0",
+    "fire>=0.7.1",
+    "h11>=0.16.0",
+    "numpy>=2.3.4",
+    "openai>=2.6.1",
+    "psutil>=7.1.2",
+    "pydantic>=2.12.3",
+    "python-dotenv>=1.2.1",
+    "pyyaml>=6.0",
+    "requests>=2.32.5",
     "tabulate>=0.9.0",
     "tqdm>=4.67.1",
+    "tree-sitter>=0.25.2",
+    "tree-sitter-language-pack>=0.10.0",
+    "urllib3>=2.5.0",
 ]
+
+[project.scripts]
+compute_eval = "compute_eval.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.3.0",
+    "pytest>=8.4.2",
     "ruff>=0.8.4",
 ]
 
-[tool.poetry]
-name = "compute-eval"
-version = "0.1.0"
-description = "Library for evaluating Large Language Models on CUDA code"
-authors = ["NVIDIA"]
-readme = "README.md"
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
-[tool.poetry.group.dev.dependencies]
-black = "^24.4.2"
-isort = "^5.13.2"
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = ["data/"]
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.poetry.scripts]
-compute_eval = "compute_eval.main:main"
+[tool.ruff.lint]
+# --select:
+# E - pycodestyle ; F - Pyflakes ; UP - pyupgrade ; B - flake8-bugbear ; SIM - flake8-simplify ; I - isort
+select = ["E", "F", "UP", "B", "SIM", "I"]
+# --ignore:
+# E501 - line too long
+# UP015 - redundant open mode
+# SIM118 - checks for key-existence checks against dict.keys() calls
+# SIM300 - constant on the left-hand side of the comparison operator
+# SIM910 - checks for dict.get() calls that pass None as the default value
+ignore = ["E501","UP015","SIM118","SIM300","SIM910"]

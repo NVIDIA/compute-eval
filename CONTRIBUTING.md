@@ -2,30 +2,36 @@
 
 ## Development
 
-To develop this library futher, it is recommended that you use Poetry for dependency management, virtualization and testing. You can read about how to install Poetry [here](https://python-poetry.org/docs/). One way for MacOS / Linux systems is
+### Prerequisites
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/) for dependency management
+
+### Installation
+
+Install uv if you haven't already:
 
 ```bash
-pip install pipx
-pipx install poetry
-pipx ensurepath # simply ensures that ~/.local/bin is added to $PATH
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-We also recommend creating the virtualenvs in the current directory itself
+Clone the repository and install dependencies:
 
 ```bash
-poetry config virtualenvs.in-project true
+git clone <repository-url>
+cd compute-eval
+uv sync
 ```
 
-To install the dependencies and the project
+This will create a virtual environment and install all dependencies. To also install development dependencies:
 
 ```bash
-poetry shell # starts a new shell inside the virtual environment
-poetry install
+uv sync --group dev
 ```
 
-`poetry install` by default installs the package in editable mode.
+### Environment Setup
 
-Create a .env file in the `compute-eval` directory.
+Create a `.env` file in the `compute-eval` directory:
 
 ```env
 NEMO_API_KEY="<PUT-YOUR-KEY-HERE>"
@@ -33,26 +39,27 @@ NEMO_API_KEY="<PUT-YOUR-KEY-HERE>"
 
 or
 
-```
-API_KEY="<PUT-YOUR-KEY-HERE>"
+```env
+OPENAI_API_KEY="<PUT-YOUR-KEY-HERE>"
 ```
 
-if using a custom model.
+if using a custom model with OpenAI API compatibility.
 
 ### Linting
 
-You will need to install the Black Python formatter and the Isort Formatter and lint on save. To do this in VSCode is simple, get [Black Python Formatter](https://marketplace.visualstudio.com/items?itemName=ms-python.black-formatter) and [Isort Formatter](https://marketplace.visualstudio.com/items?itemName=ms-python.isort) from the Marketplace
+You will need to install the Ruff Python formatter and linter. To do this in VSCode is simple, get [Ruff](https://marketplace.visualstudio.com/items?itemName=charliermarsh.ruff) from the Marketplace
 and then add these lines to either your workspace settings.json or your global settings.json
 
 ```json
 "[python]": {
-    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.defaultFormatter": "charliermarsh.ruff",
     "editor.formatOnSave": true,
     "editor.codeActionsOnSave": {
-        "source.organizeImports": "always"
+        "source.fixAll": "explicit",
+        "source.organizeImports": "explicit"
     },
 },
-"isort.args":["--profile", "black"],
+"ruff.organizeImports": true,
 ```
 
 Everytime you save the files, the linter will automatically lint for you. Depending on your workflow, you might want to have it check and report and then ask for permission to format the files.

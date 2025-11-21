@@ -1,4 +1,5 @@
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,9 +14,5 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 NOTE:
-All the data associated with this software is Licensed under CC BY 4.0
-
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: CC-BY-4.0
-
-This work is licensed under a Creative Commons Attribution 4.0 International License. https://creativecommons.org/licenses/by/4.0/
+The data in the data/ directory is licensed separately under the NVIDIA
+Evaluation Dataset License Agreement. See data/LICENSE for details.

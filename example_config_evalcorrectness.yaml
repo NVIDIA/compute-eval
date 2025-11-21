@@ -1,4 +1,0 @@
-sample_file: data/samples.jsonl
-problem_file: data/cuda_problems_121924.jsonl
-
-k: [1, 3]

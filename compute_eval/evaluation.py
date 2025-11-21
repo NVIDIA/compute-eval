@@ -42,18 +42,20 @@ import json
 import os
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Tuple
 
 import numpy as np
 import tqdm
 
-from compute_eval.data import (
-    EvaluatedSample,
-    read_problems,
-    stream_samples,
-    write_jsonl,
+from compute_eval.data.data_model import (
+    PROBLEM_SCHEMA_VERSION,
+    SOLUTION_SCHEMA_VERSION,
+    GradedSolution,
+    Problem,
 )
-from compute_eval.execution import check_correctness
+from compute_eval.data.data_pack import ProblemDatapack, SolutionDatapack
+from compute_eval.data.utils import write_graded_solutions
+from compute_eval.execution import evaluate_solution
+from compute_eval.utils.eval_utils import get_nvcc_version, parse_semver
 
 WARNING_MSG = """===================
      WARNING
@@ -110,61 +112,88 @@ def estimate_pass_at_k(
 
 
 def evaluate_functional_correctness(
-    sample_file: str,
-    problem_file: str,
-    allow_execution: bool = False,
-    k: tuple[int] = (1, 10, 100),
-    n_workers: int = 4,
-    timeout: float = 60.0,
-    results_file: str | None = None,
+    solutions_datapack: str,
+    problems_datapack_dir: str,
+    allow_execution: bool,
+    k: tuple[int] | int,
+    n_workers: int,
+    results_file: str | None,
 ):
     """
-    Evaluates the functional correctness of generated samples and writes results.
+    Evaluates the functional correctness of generated solutions and writes results.
 
     Args:
-        sample_file (str): Path to the sample file.
-        problem_file (str): Path to the problem file.
+        solutions_datapack (str): Path to the solution datapack.
+        problems_datapack_dir (str): Directory containing problem datapacks.
         allow_execution (bool): Whether to allow execution of untrusted code.
-        k (Tuple[int]): Tuple of k values for evaluation.
+        k (Tuple[int] | int): Tuple of k values for evaluation or single k value (default: 1).
         n_workers (int): Number of worker threads.
-        timeout (float): Timeout for each task in seconds.
-        results_file (str | None): Path to the output results file. If None, defaults to sample_file with '_correctness_results.jsonl' suffix.
+        results_file (str | None): Path to output results file.
 
     Returns:
         None
     """
-
     if not allow_execution:
         raise RuntimeError(WARNING_MSG)
+
+    if (installed_ctk_version := parse_semver(get_nvcc_version())) is None:
+        raise RuntimeError("Could not determine CUDA toolkit version from nvcc.")
+
+    installed_ctk_major, installed_ctk_minor, _ = installed_ctk_version
 
     # Check if only one k value was passed in (as an integer)
     # Multiple k values (tuple) is converted to a list of int
     k_vals = [k] if isinstance(k, int) else list(k)
 
-    problems = read_problems(problem_file)
-    keyed_problems = {p.task_id: p for p in problems}
+    with SolutionDatapack(solutions_datapack) as datapack:
+        release = datapack.metadata.release
 
-    # Check the generated samples against test suites.
+        print("Reading solutions...")
+        solutions = list(datapack.read_items())
+
+        # Verify that all solutions are for the current schema version
+        if any(s.schema_version != SOLUTION_SCHEMA_VERSION for s in solutions):
+            raise ValueError(
+                f"One or more solutions in {solutions_datapack} do not match the expected schema version {SOLUTION_SCHEMA_VERSION}."
+            )
+
+    problems_file = os.path.join(problems_datapack_dir, f"{release.value}-problems.tar.gz")
+    with ProblemDatapack(problems_file) as datapack:
+        # Sanity check: ensure the problems datapack matches the solutions datapack release
+        if datapack.metadata.release != release:
+            raise ValueError(
+                f"Problems datapack release {datapack.metadata.release} does not match solutions datapack release {release}."
+            )
+
+        print("Reading problems...")
+        problems = list(datapack.read_items())
+        keyed_problems: dict[str, Problem] = {p.task_id: p for p in problems}
+
+        # Verify that all problems are for the current schema version
+        if any(p.schema_version != PROBLEM_SCHEMA_VERSION for p in keyed_problems.values()):
+            raise ValueError(
+                f"One or more problems in {problems_file} do not match the expected schema version {PROBLEM_SCHEMA_VERSION}."
+            )
+
+    # Verify that each problem is attempted at least once
+    task_ids = set(p.task_id for p in problems)
+    test_ids = set(s.task_id for s in solutions)
+
+    missing_ids = task_ids - test_ids
+    if missing_ids:
+        raise ValueError(f"The following task_ids are missing in the solutions: {missing_ids}")
+
+    # Check the generated solutions against test suites.
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = []
-        results: list[EvaluatedSample] = []
+        results: list[GradedSolution] = []
 
-        print("Reading samples...")
-        samples = list(stream_samples(sample_file))
-
-        # Verify that each problem is attempted at least once
-        task_ids = set(p.task_id for p in problems)
-        test_ids = set(s.task_id for s in samples)
-        missing_ids = task_ids - test_ids
-        if missing_ids:
-            raise ValueError(f"The following task_ids are missing in the samples: {missing_ids}")
-
-        for sample in tqdm.tqdm(samples):
-            task_id = sample.task_id
+        for solution in tqdm.tqdm(solutions):
+            task_id = solution.task_id
             problem = keyed_problems.get(task_id)
 
-            args = (problem, sample, timeout)
-            future = executor.submit(check_correctness, *args)
+            args = (installed_ctk_major, installed_ctk_minor, problem, solution)
+            future = executor.submit(evaluate_solution, *args)
             futures.append(future)
 
         for future in tqdm.tqdm(as_completed(futures), total=len(futures)):
@@ -174,16 +203,16 @@ def evaluate_functional_correctness(
     write_metrics(
         results,
         pass_at_k,
-        results_file or os.path.splitext(sample_file)[0] + "_correctness_results.jsonl",
+        results_file or f"{release.value}-graded-solutions.jsonl",
     )
 
 
-def estimate_metrics(results: list[EvaluatedSample], k_vals: list[int]) -> dict[str, float]:
+def estimate_metrics(results: list[GradedSolution], k_vals: list[int]) -> dict[str, float]:
     """
-    Estimates the metrics for the given problem.
+    Estimates the metrics for the given solutions.
 
     Args:
-        results (List[EvaluatedSample]): List of evaluated samples.
+        results (List[GradedSolution]): List of graded solutions
         k_vals (List[int]): List of k values for evaluation.
 
     Returns:
@@ -195,27 +224,24 @@ def estimate_metrics(results: list[EvaluatedSample], k_vals: list[int]) -> dict[
     # Group results by task_id
     results_by_task = defaultdict(list)
     for result in results:
-        results_by_task[result.task_id].append(result)
+        results_by_task[result.solution.task_id].append(result)
 
-    for task_id, results in results_by_task.items():
-        passed = [r.passed for r in results if not r.skipped]
-
-        # If all test cases are skipped, we skip the problem.
-        if len(passed) == 0:
-            print(
-                f"Skipping problem {task_id}, it would be ignored while calculating pass@k. Possible reasons maybe incompatible GPU architecture."
-            )
-            continue
-        total.append(len(passed))
-        correct.append(sum(passed))
+    skipped = 0
+    for _, results in results_by_task.items():
+        total.append(len(results))
+        correct.append(sum(r.passed for r in results))
+        skipped += all(r.skipped for r in results)
     total = np.array(total)
     correct = np.array(correct)
 
-    return {f"pass@{k}": estimate_pass_at_k(total, correct, k).mean() for k in k_vals if (total >= k).all()}
+    return {
+        "skipped": float(skipped),
+        **{f"pass@{k}": estimate_pass_at_k(total, correct, k).mean() for k in k_vals if (total >= k).all()},
+    }
 
 
 def write_metrics(
-    results: list[EvaluatedSample],
+    results: list[GradedSolution],
     pass_at_k: dict[str, float],
     results_file: str,
 ) -> None:
@@ -232,11 +258,11 @@ def write_metrics(
     """
     # Finally, save the results in one file:
     print(f"Writing results to {results_file}...")
-    write_jsonl(results_file, (r.__dict__ for r in results))
+    write_graded_solutions(results_file, results)
 
     # Output structured JSON to stdout
     output = {
         "pass_at_k": {k: float(v) for k, v in pass_at_k.items()},
-        "problem_count": len(set(r.task_id for r in results)),
+        "problem_count": len(set(r.solution.task_id for r in results)),
     }
     print(json.dumps(output, indent=2))

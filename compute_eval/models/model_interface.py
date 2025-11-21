@@ -1,25 +1,101 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+import random
+import time
+from abc import ABC, abstractmethod
 
 from openai import OpenAI
 
+RETRIABLE_STATUS_CODES = [
+    # These are server side errors where we can get correct response if we try again later
+    429,  # Too many requests, happens you are exceeding the rate limit
+    500,  # Internal Server Error
+    502,  # Bad Gateway
+    503,  # Service Unavailable
+    504,  # Gateway Timeout Error
+]
 
-class ModelInterface:
+
+# define a retry decorator
+def retry_with_exponential_backoff(
+    func,
+    initial_delay: float = 1,
+    exponential_base: float = 2,
+    jitter: bool = True,
+    max_retries: int = 10,
+):
+    """Retry a function with exponential backoff."""
+
+    def wrapper(*args, **kwargs):
+        # Initialize variables
+        num_retries = 0
+        delay = initial_delay
+
+        # Loop until a successful response or max_retries is hit or an exception is raised
+        while True:
+            try:
+                return func(*args, **kwargs)
+
+            # Retry on specified errors
+            except Exception as e:
+                status_code = getattr(e, "status_code", None)
+
+                # Check if the status code is retriable status code
+                if status_code in RETRIABLE_STATUS_CODES:
+                    # Increment retries
+                    num_retries += 1
+
+                    # Check if max retries has been reached
+                    if num_retries > max_retries:
+                        raise Exception(f"Maximum number of retries ({max_retries}) exceeded.") from None
+
+                    # Increment the delay
+                    delay *= exponential_base * (1 + jitter * random.random())
+
+                    # Print error message
+                    print(f"Error occurred {str(e)}, retrying after {delay:.2f} seconds.")
+
+                    # Sleep for the delay
+                    time.sleep(delay)
+                elif status_code == 400:
+                    raise Exception("Invalid request was made. Check the headers and payload") from None
+                elif status_code == 401:
+                    raise Exception("Unauthorized HTTP request. Check your headers and API key") from None
+                elif status_code == 403:
+                    raise Exception("You are forbidden from accessing this resource") from None
+                else:
+                    raise Exception(
+                        f"An error occurred when accessing the model API. Check your headers and payload. Error: {str(e)}"
+                    ) from None
+
+    return wrapper
+
+
+class ModelInterface(ABC):
     """
     Base class for generating code completions.
     """
+
+    @property
+    @abstractmethod
+    def api_key(self) -> str:
+        pass
+
+    @property
+    @abstractmethod
+    def base_url(self) -> str:
+        pass
+
+    @property
+    @abstractmethod
+    def model_name(self) -> str:
+        pass
+
+    @retry_with_exponential_backoff
+    def call_chat_completions_endpoint(self, **kwargs):
+        """
+        Call the chat completions endpoint of the model API.
+        """
+        client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+        return client.chat.completions.create(**kwargs)
 
     def generate_response(self, system_prompt, prompt, params):
         """
@@ -27,13 +103,11 @@ class ModelInterface:
 
         Args:
             system_prompt (str, optional): The system prompt to use for generating completions.
-            problem (dict): The dictionary containing the problem prompt.
-            model_type (str): The type of the model ("instruct" or "base").
-            temperature (float): Temperature for sampling.
-            max_tokens (int): Maximum tokens to generate.
+            prompt (str): The user prompt to use for generating completions.
+            params (dict, optional): Additional parameters for the API call.
 
         Returns:
-            str: Generated code completion.
+            str: The generation result from the model.
         """
 
         messages = []
@@ -43,42 +117,39 @@ class ModelInterface:
 
         messages.append({"role": "user", "content": prompt})
 
-        client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+        params_dict = {
+            "model": self.model_name,
+            "messages": messages,
+            "stream": False,
+        }
 
-        try:
-            response = client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                temperature=get_parameter_value("temperature", params, 0.2),
-                top_p=get_parameter_value("top_p", params, 0.95),
-                max_tokens=get_parameter_value("max_tokens", params, 2048),
-                stream=False,
-            )
-        except response.exceptions.RequestException as e:
-            if response.status_code == 400:
-                raise Exception(
-                    "Invalid request was made. Check the headers and payload"
-                )
-            elif response.status_code == 401:
-                raise Exception(
-                    "Unauthorized HTTP request. Check your headers and API key"
-                )
-            elif response.status_code == 403:
-                raise Exception("You are forbidden from accessing this resource")
-            elif response.status_code > 400:
-                raise Exception(
-                    "An error occurred when accessing the model API. Check your headers and payload"
-                )
+        if (reasoning := getattr(self, "reasoning", None)) is not None:
+            params_dict["reasoning_effort"] = reasoning
+
+        # Add optional parameters only if they're not None
+        # Some models (e.g. o1-mini) don't support passing some args
+        # We need to exclude them
+        temperature = get_parameter_value("temperature", params, None)
+        if temperature is not None:
+            params_dict["temperature"] = temperature
+
+        top_p = get_parameter_value("top_p", params, None)
+        if top_p is not None:
+            params_dict["top_p"] = top_p
+
+        max_tokens = get_parameter_value("max_tokens", params, 2048)
+        if max_tokens is not None:
+            params_dict["max_tokens"] = max_tokens
+
+        response = self.call_chat_completions_endpoint(**params_dict)
 
         try:
             completion = response.choices[0].message.content
         except KeyError as e:
-            print(
-                f"WARNING: The completion object is invalid. Could not find the key {str(e)}"
-            )
+            print(f"WARNING: The completion object is invalid. Could not find the key {str(e)}")
             completion = ""
-        except Exception as e:
-            raise Exception(f"There was an error when accessing the completion")
+        except Exception:
+            raise Exception("There was an error when accessing the completion") from None
 
         return completion
 

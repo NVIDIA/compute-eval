@@ -5,42 +5,185 @@ ComputeEval: Evaluating Large Language Models for CUDA Code Generation
 ComputeEval is a framework designed to generate and evaluate CUDA code from Large Language Models.
 It features:
 
-- A set of handcrafted CUDA programming challenges ("problem set") designed to evaluate an LLM's capability at writing reliable CUDA code
-- Utilities for generating multiple solutions to each challenge ("samples")
-- Utilities for functional correctness of generated CUDA code
+- A set of handcrafted CUDA programming challenges designed to evaluate an LLM's capability at writing reliable CUDA code
+- Utilities for generating multiple solutions to each challenge
+- Utilities for functional correctness evaluation of generated solutions
 
 ComputeEval is currently in Alpha. We plan to refine the evaluation framework
 and make frequent updates to the dataset with additional problems spanning all
 aspects of CUDA development.
 
+## Benchmark Structure and Evaluation
+
+### Problem Organization
+
+Each problem in ComputeEval is stored as a directory under `data`, containing:
+
+```
+CUDA-0/
+├── problem-spec.yaml      # Problem metadata and configuration
+├── context/               # Files visible to the tested model/system (headers, helpers)
+│   ├── include/
+│   │   └── kernel.h       # Interface contract to implement
+│   └── helpers/
+│       └── helpers.cu     # Optional helper utilities
+├── solution/              # Reference implementation (not shown to tested model/system)
+│   └── solution.cu
+└── test/                  # Test harness (not shown to tested model/system)
+    └── test/
+        └── test_main.cu
+```
+
+#### Problem Specification Format
+
+The `problem-spec.yaml` file defines each problem's metadata and configuration:
+
+```yaml
+task_id: "CUDA/0"                     # Unique identifier (generally matches directory name)
+date: "2024-12-19"                    # Problem creation date
+problem_type: cuda_cpp                # Type: cuda_cpp or cuda_python
+prompt: "Implement a CUDA kernel..."  # Problem description shown to model
+
+# Build and test configuration
+build_command: "nvcc -I include -o test.out solution.cu test/*.cu"
+test_command: "./test.out"
+timeout_seconds: 30.0
+
+# Requirements
+min_cuda_toolkit: "12.0"             # Minimum CUDA version required
+arch_list: []                        # Optional: specific GPU architectures
+
+# Optional metadata
+metadata:
+  difficulty: medium                 # Problem difficulty level
+  tags: [kernels, memory]            # Classification tags
+  releases: [2025-1, 2025-2]         # Which releases include this problem
+  do_not_release: false              # Internal-only flag to skip CI
+
+source_references: null              # Optional: required API calls/symbols to verify
+                                     #  - string: single item must be present
+                                     #  - list of strings: all must be present
+                                     #  - {any: [...]} at least one must be present
+                                     #  - {all: [...]} all must be present
+                                     #  - {all: [...], any: [...]} combines both
+```
+
+Example with source references requiring specific CUDA APIs:
+
+```yaml
+source_references:
+  all: [cudaMalloc, cudaFree]        # Must use both malloc and free
+  any: [cudaMemcpy, cudaMemcpyAsync] # Must use at least one copy method
+```
+
+### Evaluation Rules of Engagement
+
+ComputeEval follows a strict separation between what systems/models see during generation versus what is used during evaluation:
+
+**What the system/model sees (generation time):**
+- Problem `prompt` - describes the task and requirements
+- `context_files` - headers defining interfaces, optional helper utilities
+- `build_command` - compilation instructions and flags
+- Minimum CUDA toolkit version and architecture requirements
+
+**What the system/model does NOT see:**
+- `test_files` - held-out test harness that validates correctness
+- `solution` - reference implementation directory
+
+**During evaluation:**
+1. A temporary workspace is created
+2. `context_files` are written to the workspace
+3. `test_files` are written to the workspace (now visible)
+4. The model-generated solution files are written to the workspace
+5. The `build_command` is executed to compile the unified workspace
+6. If compilation succeeds, the `test_command` is executed
+7. Test exit code determines pass/fail
+
+This ensures models cannot overfit to test cases and must solve problems based solely on the problem description and interface contracts.
+
+### Continuous Integration Validation
+
+Every problem in the repository includes a known-good reference solution. Our CI pipeline continuously validates the integrity of the benchmark by:
+
+1. Running the evaluation procedure on each problem's reference solution
+2. Verifying that build commands compile successfully
+3. Ensuring test harnesses execute correctly and pass
+4. Validating that problem specifications are well-formed
+
+This guarantees that all released problems are solvable and correctly specified.
+
+### Release Datapacks
+
+For production use, ComputeEval distributes problems as **datapacks** - versioned, immutable releases stored as compressed tarballs (`.tar.gz`):
+
+```
+data/releases/
+├── 2025-1-problems.tar.gz
+├── 2025-2-problems.tar.gz
+```
+
+#### Datapack Structure
+
+Each datapack contains:
+- **`metadata.json`** - Release version, creation timestamp, problem count, and integrity hashes
+- **`problems.jsonl`** or **`solutions.jsonl`** - One JSON object per line representing each problem/solution
+
+Problems in datapacks are serialized as JSON objects rather than directories. Each problem includes:
+- All fields from `problem-spec.yaml`
+- Embedded `context_files` (list of `{path, content}` objects)
+- Embedded `test_files` (held-out, for evaluation only)
+
+This format provides:
+- **Immutability** - Released benchmarks never change
+- **Integrity** - MD5 hashes verify problem consistency
+- **Portability** - Self-contained archives easy to distribute
+- **Versioning** - Clear separation between releases
+
+#### Release Strategy
+
+ComputeEval follows a regular release schedule:
+
+- **2025.1** (Released) - Initial benchmark with 231 problems
+- **2025.2** (Released) - Second release with expanded coverage
+- **2025.3** (Upcoming) - Third release scheduled November 2025
+
+We are committed to **permanently supporting all previous releases**. Model developers can benchmark against any release version to:
+- Track progress over time against a fixed baseline
+- Compare results with published benchmarks
+- Ensure reproducibility of evaluation results
+
+
 ## Setup
 
 ### Prerequisites
 
-- Python 3.10+ or above
+- Python 3.11+
 - NVIDIA GPU with CUDA Toolkit 12 or greater (for evaluation)
 
 ### Installation
 
-Install the package:
+Install the package using uv:
 
 ```bash
-# pip
-pip install .
-
-# Poetry
-poetry install
+uv sync
 ```
 
-Note: If you use Poetry, version 2.0 or later is recommended.
+### Pre-commit Hooks
+
+Set up pre-commit hooks for code quality:
+
+```bash
+uv sync --group dev
+uv run pre-commit install
+```
 
 ### API Keys
 
 To query an LLM, you must first obtain an API key from the respective service.
 
-#### NVIDIA NEMO (default)
+#### NVIDIA NIM
 
-To use ComputeEval with NVIDIA-hosted models, you need a key from
+To use ComputeEval with NVIDIA-hosted models, you need an API key from
 [build.nvidia.com](https://build.nvidia.com).
 
 1. Go to [build.nvidia.com](https://build.nvidia.com)
@@ -74,139 +217,137 @@ export ANTHROPIC_API_KEY="<your-anthropic-key>"
 
 ## Usage
 
-**Note:** This repository executes machine-generated CUDA code.
+**Note:** This repository executes machine-generated CUDA C++ code.
 While it's unlikely that the code is malicious, it could still pose potential risks.
-Therefore, all code execution requires the `--allow-execution` flag.
+Therefore, all code execution requires the `--allow_execution` flag.
 We strongly recommend using a sandbox environment (e.g., a Docker container or virtual machine) when running generated code to minimize security risks.
 
-ComputeEval can be configured using a YAML file that defines the parameters to the program.
-For example `example_config_gen_samples.yaml`:
+### Using Preset NIM Models
 
-```yaml
-problem_file: data/cuda_problems_121924.jsonl # Input problems
-sample_file: data/samples.jsonl # Generated samples
-
-model: llama-3.1-nemotron-70b-instruct # Model to use
-num_samples_per_problem: 3 # Samples to generate per problem
-```
-
-Note: Please set NEMO_API_KEY when using a preset NIM model.
-
-- Read the problem_file: `data/cuda_problems_121924.jsonl`
-- Generate 3 completions per problem using the `llama-3.1-nemotron-70b-instruct` model
-- Write all completions to the output samples file: `data/samples.jsonl`
-
-To use a custom model:
-
-```yaml
-problem_file: data/problems.jsonl
-sample_file: data/samples.jsonl
-
-num_samples_per_problem: 3
-
-custom_model:
-  api_endpoint: https://integrate.api.nvidia.com/v1
-  model_id: nvidia/llama-3.1-nemotron-70b-instruct
-```
-
-Note: Please set OPENAI_API_KEY when using a custom model.
-
-### Models Available
-
-The models available for completions are listed below:
-
-- "mixtral-8x22b" => mistralai/mixtral-8x22b-instruct-v0.1
-- "gemma-2b" => google/gemma-2b
-- "llama3.1-8b" => meta/llama-3.1-8b-instruct
-- "llama3.1-70b" => meta/llama-3.1-70b-instruct
-- "llama3.1-405b" => meta/llama-3.1-405b-instruct
-- "llama3.2-1b" => meta/llama-3.2-1b-instruct
-- "llama3.2-3b" => meta/llama-3.2-3b-instruct
-- "llama3.2-90b" => meta/llama-3.2-90b-vision-instruct
-- "llama3.1-nemotron-70b" => nvidia/llama-3.1-nemotron-70b-instruct
-- "nemotron-mini-4b" => nvidia/nemotron-mini-4b-instruct
-- "starcoder2-7b" => bigcode/starcoder2-7b
-- "mistral-nemo-12b" => nv-mistralai/mistral-nemo-12b-instruct
-- "openai-" => nv-mistralai/mistral-nemo-12b-instruct
-
-By default, NVIDIA hosted `llama-3.1-70b-instruct` is used.
-
-### Generate samples and evaluate
-
-Generate samples based on the config file:
+To generate solutions using NVIDIA-hosted models:
 
 ```bash
-compute_eval generate_samples -config_file=example_config_gen_samples.yaml
+uv run compute_eval generate_samples \
+  --release=2025-2 \
+  --base_url=https://integrate.api.nvidia.com/v1 \
+  --model=openai/gpt-oss-120b \
+  --solutions_per_problem=3 \
+  --n_workers=10
 ```
 
-Now you have a `data/samples.jsonl`.
+**Note:** Set `NEMO_API_KEY` environment variable when using preset NIM models.
 
-To launch an evaluation on the generated samples create a config file
-where the content of `example_config_evalcorrectness.yaml`:
+This will:
+- Read problems from the 2025-2 release datapack
+- Generate 3 solutions per problem using the `openai/gpt-oss-120b` model
+- Write all solutions to: `2025-2-openai-gpt-oss-120b-solutions.tar.gz`
+
+You can find the list of available models at [NVIDIA NIM Model Catalog](https://build.nvidia.com/models).
+
+### Using OpenAI-Compatible APIs
+
+For models with OpenAI-compatible API endpoints:
+
+```bash
+uv run compute_eval generate_samples \
+  --release=2025-2 \
+  --model=gpt-5 \
+  --solutions_per_problem=3 \
+  --n_workers=10
+```
+
+**Note:** Set `OPENAI_API_KEY` environment variable when using custom OpenAI-compatible endpoints.
+
+This will:
+- Read problems from the 2025-2 release datapack
+- Generate 3 solutions per problem using the `gpt-5` model
+- Write all solutions to: `2025-2-gpt-5-solutions.tar.gz`
+
+### Using Configuration Files
+
+You can also use YAML configuration files for convenience:
 
 ```yaml
-sample_file: data/samples.jsonl
-problem_file: data/cuda_problems_121924.jsonl
-
-k: [1, 3]
+# config.yaml
+release: 2025-2
+model: gpt-5
+solutions_per_problem: 3
+n_workers: 10
 ```
 
 ```bash
-compute_eval evaluate_functional_correctness -config_file=example_config_evalcorrectness.yaml
+uv run compute_eval generate_samples --config_file=config.yaml
 ```
 
-Note: the program will ask you to allow code execution by adding the `--allow-execution` flag.
+CLI arguments override config file values.
+
+### Generating and Evaluating Solutions
+
+After generating solutions (see examples above), evaluate them with:
 
 ```bash
-compute_eval evaluate_functional_correctness -config_file=example_config_evalcorrectness.yaml --allow-execution
+uv run compute_eval evaluate_functional_correctness \
+  --solutions_datapack=2025-2-gpt-5-solutions.tar.gz \
+  --allow_execution=true \
+  --k='(1, 3)' \
+  --n_workers=4
 ```
 
-- This will read the problems and the sample file
-- It will run each of the samples through a functional correctness testing suite
-- It will output a `pass@k` dictionary with 2 `pass@k` values for k = 1 nand k = 3
+**Security Note:** You must pass `--allow_execution=true` to run the evaluation. As described in the Evaluation Rules of Engagement section, this executes untrusted model-generated code, so use appropriate sandboxing.
 
-Caveats:
+This will:
+- Read the problems and solutions datapacks
+- Build and execute each solution in an isolated workspace with the test harness
+- Output structured JSON with `pass@k` metrics and problem count
+- Write results to a graded solutions file (e.g., `2025-2-graded-solutions.jsonl`)
 
-- The `k` argument for `evaluate_functional_correctness` should be a comma-separated e.g., `[1,10]`.
-- Note that if you have a list of `k` that you want used in evaluation, then `max(k) <= num_samples_per_problem` else that `k` value will not show up in the pass@k dict generated.
+**Note:** The `k` parameter can be a single integer (`--k=1`) or a tuple (`--k='(1, 3)'`). For accurate pass@k estimates, ensure `max(k) <= solutions_per_problem`.
 
-## Command Documentation
+## Command Reference
 
 ### `generate_samples`
 
-This command generates samples for given problems using a specified model and writes them to the specified sample_file.
+Generates solutions for all problems in a release datapack using a specified model or custom API endpoint.
 
-#### Arguments
+#### Configuration Parameters
 
-- `problem_file` (str): The path to the file containing the problems to generate samples for.
-- `sample_file` (str, optional): The path to the file where the generated samples will be written. (default: `generated_samples.jsonl`).
-- `num_samples_per_problem` (int, optional): The number of samples to generate per problem (default: 100).
-- `n_workers` (int, optional): The number of worker threads to use (default: 20).
-- `system_prompt` (str, optional): The system prompt to use (default: a predefined CUDA programming prompt).
-- `max_tokens` (int, optional): The maximum number of tokens for the model to generate (default: 1024).
-- `print_completions` (bool, optional): Flag to specify if you want the completions printed to stdout. (default: False)
-- `model` (str, optional): The model to use for generating samples (default: "llama3.1-70b").
-- `model_type` (str, optional): The type of model (default: "instruct").
-- `custom_model` (dict, optional): api_endpoint (base url) and model_id (model name) for any model that uses the OpenAI API. Please use the OPENAI_API_KEY to set your credentials when using a custom model.
-- `params` (dict, optional): parameters for the chat completions request - temperature, top_p, max_tokens.
+All parameters can be specified in a YAML config file or passed as CLI arguments (CLI arguments take precedence).
+
+- `release` (str): Release version to generate solutions for (e.g., "2025-2") (default: "2025-2")
+- `problems_datapack_dir` (str): Directory where released problem datapacks are stored (default: "data/releases/")
+- `solutions_per_problem` (int): Number of solutions to generate per problem (default: 1)
+- `n_workers` (int): Number of worker threads to use (default: 10)
+- `system_prompt` (str): System prompt for the model (default: predefined CUDA programming prompt)
+- `model` (str): Model to use (use an appropriate NIM or use an OpenAI model name) (required)
+- `base_url` (str | None): Custom API base URL (default: None)
+- `reasoning` (str | None): Reasoning level for OpenAI models (e.g., "low", "medium", "high") (default: None)
+- `temperature` (float): Sampling temperature for generation (default: 1.0)
+- `top_p` (float): Nucleus sampling parameter (default: Model dependent)
+- `max_tokens` (int): Maximum tokens to generate (default: Model dependent)
+- `temp_dir` (str | None): Temporary directory for intermediate results (default: None)
+- `debug` (bool): Include system prompt, prompt, and completion in output for debugging (default: False)
+
+**Note**: `model` must be specified.
 
 ### `evaluate_functional_correctness`
 
-This command evaluates the functional correctness of generated samples and outputs a `pass@k` dictionary
+Evaluates the functional correctness of generated solutions by compiling and executing them against held-out test suites. Outputs structured JSON with `pass@k` metrics.
 
-#### Arguments
+#### Configuration Parameters
 
-- `sample_file` (str): The path to the file containing the samples to be evaluated.
-- `problem_file` (str): The path to the file containing the problems to evaluate against.
-- `k` (str, optional): The list of values for k, as a comma-separated string (default: "1,10,100").
-- `n_workers` (int, optional): The number of worker threads to use (default: 4).
-- `timeout` (float, optional): The timeout for each evaluation in seconds (default: 3.0).
-- `save_completions_dir` (str, optional): Directory path where the samples will be stored as .cu files (default: "" i.e not saved)
+All parameters can be specified in a YAML config file or passed as CLI arguments (CLI arguments take precedence).
+
+- `solutions_datapack` (str): Path to the solutions datapack file (required)
+- `problems_datapack_dir` (str): Directory where released problem datapacks are stored (default: "data/releases/")
+- `allow_execution` (bool): Whether to allow execution of untrusted code - must be set to True (default: False)
+- `k` (int | tuple[int, ...]): K value(s) for pass@k evaluation (default: 1)
+- `n_workers` (int): Number of worker threads (default: 4)
+- `results_file` (str | None): Path to output results file (default: auto-generated from release name)
 
 ## Dataset
 
-For more information about the dataset see `DATASET_CARD.md`.
+For more information about the dataset see [`DATASET_CARD.md`](DATASET_CARD.md).
 
 ## Contributing
 
-See `contributing.md` for development instructions.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development instructions.

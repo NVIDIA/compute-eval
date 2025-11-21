@@ -1,22 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-import os
 import dotenv
 
 from compute_eval.models.model_interface import ModelInterface
+from compute_eval.token_provider import get_token_for_url
+
+# Check API keys in order of preference
+_api_key_names = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "NEMO_API_KEY"]
 
 
 class OpenAIModel(ModelInterface):
@@ -28,18 +16,47 @@ class OpenAIModel(ModelInterface):
         model_name (str): Name of the model to use for generating completions.
     """
 
-    def __init__(self, base_url, model_name):
+    _api_key_printed = False
+
+    def __init__(
+        self,
+        model_name: str,
+        base_url: str | None,
+        reasoning: str | None = None,
+    ):
         dotenv.load_dotenv()
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        if self.api_key is None:
-            raise Exception("OPENAI_API_KEY is missing from the .env file.")
 
-        self.model_name = model_name
-        self.base_url = base_url
+        self._model_name = model_name
+        self._base_url = base_url or "https://api.openai.com/v1"
+        self.reasoning = reasoning
 
-    def generate_response(self, system_prompt, prompt, params):
-        """
-        Interact with the OpenAI API to generate code completions.
-        """
+        self._api_key_name = None
 
-        return super().generate_response(system_prompt, prompt, params)
+        for key_name in _api_key_names:
+            if get_token_for_url(self._base_url, key_name) is not None:
+                self._api_key_name = key_name
+                break
+
+        if self._api_key_name is None:
+            raise Exception(
+                f"Could not find any of: {', '.join(_api_key_names)}. Please set one of these environment variables."
+            )
+
+        if not OpenAIModel._api_key_printed:
+            print(f"Using {self._api_key_name} for authentication")
+            OpenAIModel._api_key_printed = True
+
+    @property
+    def api_key(self) -> str:
+        url = get_token_for_url(self.base_url, self._api_key_name)
+        if url is None:
+            raise Exception(f"Could not get {self._api_key_name}.")
+        return url
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name

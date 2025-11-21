@@ -42,3 +42,10 @@ env/
 
 # Ignore the generated results file
 **/*results.jsonl
+
+# Ignore pycharm configurations
+.idea/
+
+# Ignore Claude files
+.claude/
+CLAUDE.md

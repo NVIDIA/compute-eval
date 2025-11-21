@@ -1,0 +1,25 @@
+# .pre-commit-config.yaml
+exclude: >
+  (?x)^(
+    \.vscode/.*|
+    compute_eval/temp/.*|
+    data/.*
+  )$
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.0.1 # Use the latest version
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--unsafe]
+      - id: check-added-large-files
+      - id: check-json
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.2
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
