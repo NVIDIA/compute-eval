@@ -1,8 +1,0 @@
-problem_file: data/example_test.jsonl   # Input problems
-sample_file: data/samples.jsonl          # Generated samples
-
-custom_model: 
-  api_endpoint: https://integrate.api.nvidia.com/v1
-  model_id: meta/llama-3.1-70b-instruct   # Model to use
-
-  num_samples_per_problem: 3               # Samples to generate per problem

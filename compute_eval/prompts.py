@@ -1,53 +1,106 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+from compute_eval.data.data_model import Problem, SourceFile
 
-from compute_eval.data import Problem
+SYSTEM_PROMPT = """
+You are a senior CUDA/C/C++ engineer. Produce complete, compilable solutions from a structured problem specification. Follow these rules:
 
-SYSTEM_PROMPT = """You are a CUDA programming expert capable of generating high-quality, efficient CUDA code with best practices, optimized for performance and clarity.
-Instructions:
-1. Implement the body of the function(s). Do not include any additional code outside the function(s).
-2. Wrap the completed function code, including the provided signatures, inside a single ```cuda markdown code block.
-3. Make sure to use the precise function signature in your response if it's provided in the query.
+General
+- You will be given: a problem description, context files (editable), and build environment details (e.g., build command).
+- Hidden tests exist but are not shown. Do not mention tests, do not write test code, and do not add I/O used only for testing.
+- Use only the APIs and contracts specified in the problem and context files. Preserve all provided function signatures exactly.
+- Prefer using only headers already present in the provided codebase. Avoid adding new headers unless strictly necessary and supported by the build command. Do not introduce third-party dependencies.
+
+Context files policy
+- You may modify provided context files when necessary. If you include any file in your solution output (new or modified), emit its full and final contents; your output will overwrite the provided version.
+- Only emit files you add or modify. Do not output files that are unchanged, and do not include placeholder blocks saying "no changes" or similar.
+
+Build command
+- You should pay careful attention to the build command or any context files about the build process.
+- The build command and/or context build files may include important hints about required files or expected project structure.  This likely includes the name of the expected solution file, important macros, standards, or linked libraries.
+- Pay special attention to -I or -isystem flags -- they indicate important include paths.  Remember, if a -I or -isystem flag is present you do not need to include the relative path in your #include statements.
+
+
+Output format
+- Output only source files needed for the solution. No explanations or commentary.
+- Each file must be in its own fenced code block, with the first line indicating its path as a comment.
+  Example:
+  ```
+  // file: geodistance.cu
+  #include "geodistance.h"
+  ...
+  ```
+
+Code quality and constraints
+
+The solution must compile cleanly with the provided build command and target architectures.
+Avoid unnecessary heap allocations, environment access, and global mutable state. Keep deterministic behavior.
+Honor all contracts, constants, and macros defined in provided headers.
+
+For CUDA:
+Implement kernels with correct global signatures and parameter types.
+Bounds-check all memory accesses; consider grid-stride loops when appropriate for scalability.
+Favor coalesced memory access and avoid undefined behavior.
+Apply appropriate numerical stability practices when needed (e.g., clamp arguments before acos/asin).
+
+Reasoning discipline
+
+Think through edge cases and performance internally, but output only the final code files, no analysis or explanations. 
 """
 
-USER_PROMPT_TEMPLATE = """{user_prompt}\n{header_files_prompt}"""
+_USER_PROMPT = """
+Produce the complete solution as one or more source files that compile with the provided build command. Do not output anything except the code files.
 
-HEADER_FILES_PROMPT_TEMPLATE = """
-The following headers are already defined and should not be included in the response:
-```cuda
-{header_files}
+Problem
+Description: 
+{prompt}
+
+Build command: 
+{build_command}
+
+Context files:
+{context_files_block}
+
+Output requirements
+
+Emit only the source files necessary to satisfy the problem (new or modified).
+Only emit files you add or modify. Do not output files that are unchanged, and do not include placeholder blocks saying "no changes" or similar.
+Do not include any test code or references to tests.
+If an interface header is provided (e.g., declares functions to implement), place implementations in a corresponding .cu/.cc source file and include that header.
+Begin your response with the first code block. 
+"""
+
+_CONTEXT_FILES_BLOCK_TEMPLATE = """
+--- file: {path}
+```{fence}
+{content}
 ```
-Please do not include any additional headers in your response.
 """
 
 
-def extract_header_files_from_problem(problem: Problem) -> str:
-    declaration = problem.declaration
-    header_files = []
-    for header_file in declaration.split("\n"):
-        header_file = header_file.strip()
-        # header file starts with #include
-        if header_file.startswith("#include"):
-            header_files.append(header_file)
-    return "\n".join(header_files)
+def _fence_for_path(path: str) -> str:
+    p = path.lower()
+    if p.endswith((".cu", ".cuh")):
+        return "cuda"
+    if p.endswith((".cc", ".cpp", ".cxx")):
+        return "cpp"
+    if p.endswith(".c"):
+        return "c"
+    if p.endswith(".h") or p.endswith(".hpp"):
+        return "h"
+    # Default to plaintext if unknown
+    return ""
 
 
-def generate_user_prompt(problem: Problem, include_header_files: bool = False) -> str:
-    header_files = extract_header_files_from_problem(problem)
-    header_files_prompt = ""
-    if include_header_files and header_files:
-        header_files_prompt = HEADER_FILES_PROMPT_TEMPLATE.format(header_files=header_files)
+def _format_context_files_block(context_files: list[SourceFile]) -> str:
+    blocks: list[str] = []
+    for source in context_files:
+        fence = _fence_for_path(source.path)
+        blocks.append(_CONTEXT_FILES_BLOCK_TEMPLATE.format(path=source.path, fence=fence, content=source.content))
+    return "".join(blocks)
 
-    return USER_PROMPT_TEMPLATE.format(user_prompt=problem.prompt, header_files_prompt=header_files_prompt)
+
+def to_user_message(problem: Problem) -> str:
+    return _USER_PROMPT.format(
+        prompt=problem.prompt,
+        build_command=problem.build_command,
+        context_files_block=_format_context_files_block(problem.context_files),
+    )

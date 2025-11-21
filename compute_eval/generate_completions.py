@@ -19,24 +19,24 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import tqdm
 
-from compute_eval.models.claude import ClaudeModel
-from compute_eval.models.nim_model import NimModel
-from compute_eval.models.openAI_model import OpenAIModel
+from compute_eval.data.data_model import FileSolution, Problem, ReleaseVersion, Solution, SourceFile
+from compute_eval.data.utils import read_solutions, write_solutions
 
-from .data import Problem, read_problems, stream_jsonl, write_jsonl
-from .prompts import SYSTEM_PROMPT, generate_user_prompt
+from . import get_model_class
+from .data.data_pack import ProblemDatapack, SolutionDatapack
+from .models.model_interface import ModelInterface
+from .prompts import to_user_message
 
 
 def generate_model_completions(
     system_prompt: str,
     problem: Problem,
-    print_completions: bool,
-    include_header_files: bool,
-    model: str | None,
-    model_type: str | None,
-    custom_model: dict | None = None,
+    model: str,
+    base_url: str | None = None,
+    reasoning: str | None = None,
     params: dict | None = None,
-):
+    debug: bool = False,
+) -> Solution:
     """
     Orchestrate the generation of code completions using the specified model.
 
@@ -44,144 +44,81 @@ def generate_model_completions(
         system_prompt (str): The system prompt to use for generating completions.
         problem (Problem): The problem object containing the task details.
         model (str): The name of the model to use for generating completions.
-        model_type (str): The type of the model ("instruct" or "base").
-        print_completions (bool): Whether to print the completions.
-        include_header_files (bool): Whether to include header files in the prompt.
-        custom_model (dict, optional): Custom model object to use for generating completions.
-        params (dict, optional): Additional parameters to pass to the model.
+        base_url (str, optional): The base URL for the custom model API endpoint.
+        reasoning (str, optional): Reasoning mode for the model (e.g., 'low', 'medium', 'high' for GPT models, or any value for Claude models to enable extended thinking).
+        params (dict, optional): Additional parameters to pass to the model invocation.
+        debug (bool, optional): Whether to include the system prompt, prompt, and generated completion in the output solution for debugging.
 
     Returns:
-        str: runnable code completion, including declaration, completion, and test code.
+        solution (Solution): The generated solution object containing the completions.
     """
 
-    # Means we are invoking a model from the preset list of models
+    model_class = get_model_class(model)
+    model_instance: ModelInterface = model_class(
+        model_name=model,
+        base_url=base_url,
+        reasoning=reasoning,
+    )
 
-    if custom_model is not None:
-        model_instance = OpenAIModel(base_url=custom_model["api_endpoint"], model_name=custom_model["model_id"])
-    else:
-        model_map = {
-            "mixtral-8x22b-v0.1": lambda: NimModel(
-                "mistralai/mixtral-8x22b-instruct-v0.1"
-            ),
-            "gemma-2-2b-it": lambda: NimModel("google/gemma-2-2b-it"),
-            "llama-3.1-8b-instruct": lambda: NimModel("meta/llama-3.1-8b-instruct"),
-            "llama-3.1-70b-instruct": lambda: NimModel("meta/llama-3.1-70b-instruct"),
-            "llama-3.1-405b-instruct": lambda: NimModel("meta/llama-3.1-405b-instruct"),
-            "llama-3.2-1b-instruct": lambda: NimModel("meta/llama-3.2-1b-instruct"),
-            "llama-3.2-3b-instruct": lambda: NimModel("meta/llama-3.2-3b-instruct"),
-            "llama-3.1-nemotron-70b-instruct": lambda: NimModel(
-                "nvidia/llama-3.1-nemotron-70b-instruct"
-            ),
-            "nemotron-mini-4b-instruct": lambda: NimModel(
-                "nvidia/nemotron-mini-4b-instruct"
-            ),
-            "starcoder2-7b": lambda: NimModel("bigcode/starcoder2-7b"),
-            "mistral-nemo-12b-instruct": lambda: NimModel(
-                "nv-mistralai/mistral-nemo-12b-instruct"
-            ),
-            "claude-sonnet-3.5": lambda: ClaudeModel("claude-3-5-sonnet-20241022"),
-        }
+    if params is None:
+        params = {}
 
-        assert model in model_map, f"Unsupported model: {model}"
+    prompt = to_user_message(problem)
 
-        model_instance_factory = model_map.get(model)
-        if model_instance_factory is None:
-            raise ValueError(f"Unsupported model: {model}")
-
-        model_instance = model_instance_factory()
-
-    prompt = generate_user_prompt(problem, include_header_files=include_header_files)
     completion = model_instance.generate_response(system_prompt, prompt, params)
 
-    if print_completions:
-        if hasattr(problem, "cuda_toolkit"):
-            print(f"CUDA toolkit: {problem.cuda_toolkit}")
-        print("=" * 30)
+    debug_info = (
+        {
+            "system_prompt": system_prompt,
+            "prompt": prompt,
+            "generated_completion": completion,
+        }
+        if debug
+        else {}
+    )
 
-        print(problem.task_id + "\n")
-        print(f"=== Prompt ===\n{prompt}\n")
-
-    if model_type == "instruct":
-        # we need to parse the completion to get the code
-        # first, check whether the declaration provides the function signature
-        drop_signature = False
-        # TODO: TBD on improving this logic
-        declaration = problem.declaration
-        if declaration.strip().endswith("{"):
-            drop_signature = True
-
-        function_body = parse_function_body(completion, drop_signature=drop_signature)
-    else:
-        function_body = completion
-
-    if print_completions:
-        print(f"=== Completion ===\n{completion}\n")
-
-    result = problem.declaration + "\n\n"
-    result = result + "// completion-begin \n"
-    result = result + function_body + "\n"
-    result = result + "// completion-end \n\n"
-    result = result + problem.test
-
-    return problem.task_id, result, completion, prompt
-
-
-def parse_function_body(input_string, drop_signature: bool = True):
-    """
-    Extract function body from the response of the model.
-
-    Args:
-        input_string (str): The response string from the model.
-        drop_signature (bool): Whether to remove the function signature. Default is True.
-
-    Returns:
-        str: The extracted function body, or the original string if no code fences are found.
-    """
-
-    # Regular expression to find code fences and extract the code between them
-    fence_pattern = re.compile(r"```\s*[a-zA-Z]*\s*\n(.*?)```", re.DOTALL)
-    fence_matches = fence_pattern.findall(input_string)
-
-    if len(fence_matches) == 0:
-        return input_string.strip()  # Return the original input if no code fences are found
-
-    # Use the code block from the first code fence found
-    code_block = fence_matches[0].strip()
-
-    if not drop_signature:
-        return code_block
-
-    # Regular expression to match the function body
-    body_pattern = re.compile(r"{(.*)}", re.DOTALL)
-    body_match = body_pattern.search(code_block)
-
-    if body_match:
-        function_body = body_match.group(1)
-        return function_body + "\n}"
-    else:
-        return code_block
+    return FileSolution(
+        task_id=problem.task_id,
+        files=_parse_solution(completion),
+        **debug_info,
+    )
 
 
 def generate_samples(
-    problem_file: str,
-    sample_file: str = "generated_samples.jsonl",
-    num_samples_per_problem: int = 100,
-    n_workers: int = 20,
-    system_prompt: str | None = SYSTEM_PROMPT,
-    print_completions: bool = False,
-    include_header_files: bool = False,
-    model: str | None = "llama3.1-70b",
-    model_type: str | None = "instruct",
-    custom_model: dict | None = None,
-    params: dict | None = None,
-    temp_dir: str | None = None,
+    release: ReleaseVersion,
+    problems_datapack_dir: str,
+    solutions_per_problem: int,
+    n_workers: int,
+    system_prompt: str,
+    model: str,
+    base_url: str | None,
+    reasoning: str | None,
+    temperature: float | None,
+    top_p: float | None,
+    max_tokens: int | None,
+    temp_dir: str | None,
+    debug: bool,
 ):
-    """Generates `n_samples_per_problem` number of completions for each of the problems in the
-    problem file and then writes them out to the samples.jsonl file provided.
+    """
+    Generates code completions for a set of problems using a specified model and writes them to a solutions datapack.
+    Args:
+        release (ReleaseVersion): The release version to generate solutions for.
+        problems_datapack_dir (str): Directory where released problem datapacks are stored.
+        solutions_per_problem (int): Number of solutions to generate per problem.
+        n_workers (int): Number of worker threads to use for parallel generation.
+        system_prompt (str): The system prompt to use for generating completions.
+        model (str): The name of the model to use for generating completions.
+        base_url (str | None): Base URL for the custom model API endpoint.
+        reasoning (str | None): Reasoning mode for the model (e.g., 'low', 'medium', 'high' for GPT models, or any value for Claude models to enable extended thinking).
+        temperature (float | None): Temperature for generation.
+        top_p (float | None): Top-p for generation.
+        max_tokens (int | None): Maximum tokens for generation.
+        temp_dir (str | None): Temporary directory to store intermediate results.
+        debug (bool): Whether to include the system prompt, prompt, and generated completion in the output solution for debugging.
     """
 
-    def _task_id_to_filename(directory: str, task_id: str) -> str:
-        return f"{directory}/{task_id.replace('/', '_')}.jsonl"
+    def _task_id_to_filename(directory: str, _id: str) -> str:
+        return f"{directory}/{_id.replace('/', '_')}.jsonl"
 
     if temp_dir is None:
         temp_dir = model if model else "temp_results"
@@ -189,7 +126,14 @@ def generate_samples(
     if not os.path.exists(temp_dir):
         os.makedirs(temp_dir)
 
-    problems = read_problems(problem_file)
+    problem_file = os.path.join(problems_datapack_dir, f"{release.value}-problems.tar.gz")
+    with ProblemDatapack(problem_file) as datapack:
+        if datapack.metadata.release != release:
+            raise ValueError(
+                f"Problems datapack release {datapack.metadata.release} does not match expected release {release}."
+            )
+        problems = list(datapack.read_items())
+
     task_count = {p.task_id: _count_lines(_task_id_to_filename(temp_dir, p.task_id)) for p in problems}
 
     print("Started generating the model completions")
@@ -197,40 +141,37 @@ def generate_samples(
         futures = []
         for problem in problems:
             existing_sample_count = task_count.get(problem.task_id, 0)
-            samples_to_generate = num_samples_per_problem - existing_sample_count
+            solutions_to_generate = solutions_per_problem - existing_sample_count
 
-            if samples_to_generate <= 0:
-                print(f"Skipping {problem.task_id}, already have {existing_sample_count} samples")
+            if solutions_to_generate <= 0:
+                print(f"Skipping {problem.task_id}, already have {existing_sample_count} solutions")
                 continue
 
-            for _ in range(samples_to_generate):
-                args = (
-                    system_prompt,
-                    problem,
-                    print_completions,
-                    include_header_files,
-                    model,
-                    model_type,
-                    custom_model,
-                    params,
-                )
-                future = executor.submit(generate_model_completions, *args)
+            for _ in range(solutions_to_generate):
+                params = {
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "max_tokens": max_tokens,
+                }
+                args = {
+                    "system_prompt": system_prompt,
+                    "problem": problem,
+                    "model": model,
+                    "base_url": base_url,
+                    "reasoning": reasoning,
+                    "params": params,
+                    "debug": debug,
+                }
+                future = executor.submit(generate_model_completions, **args)
                 futures.append(future)
 
         print("Waiting for all the model completions")
         for future in tqdm.tqdm(as_completed(futures), total=len(futures)):
             try:
-                result = future.result()
-                task_id = result[0]
-                result_data = {
-                    "task_id": result[0],
-                    "compilable_code": result[1],
-                    "generated_completion": result[2],
-                    "prompt": result[3],
-                }
-                write_jsonl(
-                    filename=_task_id_to_filename(temp_dir, task_id),
-                    data=[result_data],
+                solution = future.result()
+                write_solutions(
+                    file_path=_task_id_to_filename(temp_dir, solution.task_id),
+                    solutions=[solution],
                     append=True,
                 )
             except Exception as e:
@@ -239,13 +180,18 @@ def generate_samples(
     all_results = []
     for task_file in sorted(os.listdir(temp_dir)):
         task_file_path = os.path.join(temp_dir, task_file)
-        all_results.extend(stream_jsonl(task_file_path))
+        all_results.extend(read_solutions(task_file_path))
 
-    if len(all_results) != len(problems) * num_samples_per_problem:
-        print(f"Error: Expected {len(problems) * num_samples_per_problem} samples, but got {len(all_results)}")
+    if len(all_results) != len(problems) * solutions_per_problem:
+        print(f"Error: Expected {len(problems) * solutions_per_problem} samples, but got {len(all_results)}")
         raise ValueError("Sample generation incomplete")
 
-    write_jsonl(sample_file, all_results)
+    model = model.replace("/", "-") if model else None
+    SolutionDatapack.create(
+        file_path=f"{release.value}-{model}-solutions.tar.gz" if model else f"{release.value}-solutions.tar.gz",
+        items=all_results,
+        release=release,
+    )
 
     # Clean up temporary files
     for task_file in os.listdir(temp_dir):
@@ -272,3 +218,82 @@ def _count_lines(filename: str) -> int:
             for _ in fp:
                 count += 1
     return count
+
+
+_CODE_BLOCK_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL | re.MULTILINE)
+_FIRST_LINE_PATH_RE = re.compile(r"^(?://|#|;)\s*file:\s*([A-Za-z0-9._/\-]+)\s*$", re.IGNORECASE)
+_FIRST_LINE_BLOCK_COMMENT_PATH_RE = re.compile(r"^\s*/\*\s*file:\s*(.+?)\s*\*/\s*$", re.IGNORECASE)
+
+
+def _normalize_newlines(s: str) -> str:
+    return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _guess_ext_from_lang(lang: str) -> str:
+    lang = (lang or "").strip().lower()
+    if lang == "cuda":
+        return ".cu"
+    if lang in ("cpp", "c++"):
+        return ".cc"
+    if lang == "c":
+        return ".c"
+    if lang in ("h", "hpp", "header"):
+        return ".h"
+    return ".txt"
+
+
+def _parse_solution(response: str) -> list[SourceFile]:
+    if not isinstance(response, str):
+        raise TypeError("response must be a string")
+
+    text = _normalize_newlines(response)
+    matches = list(_CODE_BLOCK_RE.finditer(text))
+
+    # If no fenced code blocks found, treat entire response as raw code
+    if not matches:
+        source_file = _process_code_block(text)
+        return [source_file] if source_file else []
+
+    # Process each fenced code block
+    files: list[SourceFile] = []
+    for m in matches:
+        block = _normalize_newlines(m.group(2))
+        source_file = _process_code_block(block)
+        if source_file:
+            files.append(source_file)
+
+    return files
+
+
+def _process_code_block(block: str) -> SourceFile | None:
+    """Process a single code block and extract path + content."""
+    block_stripped = block.lstrip("\n")
+    lines = block_stripped.split("\n")
+    if not lines:
+        return None
+
+    first_line = lines[0].strip("\ufeff").strip()
+    path = _extract_path_from_line(first_line)
+
+    if not path:
+        return None
+
+    return SourceFile(
+        path="solution.cu",
+        content="\n".join(lines[1:]),
+    )
+
+
+def _extract_path_from_line(line: str) -> str | None:
+    """Extract file path from a line using various comment formats."""
+    # Try regular path format first
+    m1 = _FIRST_LINE_PATH_RE.match(line)
+    if m1:
+        return m1.group(1).strip()
+
+    # Try block comment format
+    m2 = _FIRST_LINE_BLOCK_COMMENT_PATH_RE.match(line)
+    if m2:
+        return m2.group(1).strip()
+
+    return None
