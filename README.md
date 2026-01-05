@@ -139,13 +139,9 @@ This format provides:
 - **Portability** - Self-contained archives easy to distribute
 - **Versioning** - Clear separation between releases
 
-#### Release Strategy
+#### Release Support
 
-ComputeEval follows a regular release schedule:
-
-- **2025.1** (Released) - Initial benchmark with 231 problems
-- **2025.2** (Released) - Second release with expanded coverage
-- **2025.3** (Upcoming) - Third release scheduled November 2025
+ComputeEval follows a continuous delivery model. New problems and improvements are released regularly as versioned datapacks.
 
 We are committed to **permanently supporting all previous releases**. Model developers can benchmark against any release version to:
 - Track progress over time against a fixed baseline
