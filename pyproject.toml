@@ -22,7 +22,6 @@ dependencies = [
     "tqdm>=4.67.1",
     "tree-sitter>=0.25.2",
     "tree-sitter-language-pack>=0.10.0",
-    # Note the downgraded urllib3 version is because kubernetes is currently urllib3<2.4 until the next release
     "urllib3>=2.3.0",
 ]
 
