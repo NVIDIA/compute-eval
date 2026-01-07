@@ -6,12 +6,12 @@ readme = "README.md"
 authors = [
     { name = "NVIDIA" }
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.72.0",
     "fire>=0.7.1",
     "h11>=0.16.0",
-    "numpy>=2.3.4",
+    "numpy~=2.1.0",
     "openai>=2.6.1",
     "psutil>=7.1.2",
     "pydantic>=2.12.3",
@@ -22,7 +22,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "tree-sitter>=0.25.2",
     "tree-sitter-language-pack>=0.10.0",
-    "urllib3>=2.5.0",
+    "urllib3>=2.3.0",
 ]
 
 [project.scripts]
@@ -31,6 +31,12 @@ compute_eval = "compute_eval.main:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["compute_eval"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"data/releases" = "compute_eval/releases"
 
 [dependency-groups]
 dev = [
@@ -44,7 +50,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py310"
 exclude = ["data/"]
 
 [tool.ruff.lint]
