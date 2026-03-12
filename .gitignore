@@ -49,3 +49,9 @@ env/
 # Ignore Claude files
 .claude/
 CLAUDE.md
+
+# Batch generation files
+.batch_generation_state.json
+generated_solutions/
+generation_temp/
+logs/generation/

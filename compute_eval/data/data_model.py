@@ -47,9 +47,11 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    model_serializer,
     model_validator,
 )
 
+from compute_eval.data.metrics_data_model import PerformanceMetrics, ProcessTimingMode, TimingModes
 from compute_eval.utils.parsing import get_most_likely_language
 
 PROBLEM_SCHEMA_VERSION = 2
@@ -62,11 +64,35 @@ class ReleaseVersion(str, Enum):
     V2025_1 = "2025-1"
     V2025_2 = "2025-2"
     V2025_3 = "2025-3"
+    V2026_1 = "2026-1"
 
 
 class SourceFile(BaseModel):
     path: str
     content: str
+
+
+#: Valid group names for categorizing problems by topic.
+#:
+#: - cuda-runtime: CUDA Runtime & Execution Model (kernel launch, memory management,
+#:   streams, events, CUDA Graphs, cluster launch, occupancy)
+#: - cuda-kernels: CUDA Kernel Programming (shared memory, warp intrinsics, reductions,
+#:   stencils, tensor cores, cooperative groups, applied GPU computation)
+#: - cccl: CCCL (CUDA C++ Core Libraries) - Thrust, CUB, and libcu++
+#: - cublas: cuBLAS - Dense linear algebra (BLAS levels 1-3, extensions)
+#: - mathlibs: Math Libraries - cuSPARSE, cuSOLVER, cuFFT, cuRAND
+#: - cutile: cuTile - Tile-based programming with cuTile kernels and patterns
+#: - cudnn: cuDNN - Deep Neural Network library (convolutions, pooling,
+#:   normalization, activations using cuDNN Graph API)
+ValidGroup = Literal[
+    "cuda-runtime",
+    "cuda-kernels",
+    "cccl",
+    "cublas",
+    "mathlibs",
+    "cutile",
+    "cudnn",
+]
 
 
 class Metadata(BaseModel):
@@ -106,6 +132,8 @@ class Problem(BaseModel, ABC):
     task_id: str
     date: str
     prompt: str
+    metadata: Metadata
+    group: ValidGroup
 
     context_files: list[SourceFile] = Field(default_factory=list)
     test_files: list[SourceFile] = Field(default_factory=list)
@@ -114,10 +142,18 @@ class Problem(BaseModel, ABC):
 
     build_command: str | None = None
     test_command: str
+    benchmark_command: str | None = None
+
+    timing_mode: TimingModes = Field(
+        default_factory=ProcessTimingMode, description="Method for extracting performance timing from metrics"
+    )
 
     min_cuda_toolkit: str | None = None
+    compute_capability: str | None = Field(default="8.0")
+    requires_datacenter_gpu: bool = Field(default=False)
     timeout_seconds: float | None = None
-    metadata: Metadata | None = None
+
+    baseline_solution: Annotated["FileSolution | PatchSolution", Field(discriminator="type")] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -128,11 +164,36 @@ class Problem(BaseModel, ABC):
         adapter = TypeAdapter(Annotated[CudaCppProblem | CudaPythonProblem, Field(discriminator="type")])
         return adapter.validate_python(data)
 
+    @model_serializer(mode="wrap", when_used="json")
+    def _serialize_model(self, serializer, info):
+        """Normalize source_references field for consistent serialization to HuggingFace datasets."""
+        data = serializer(self)
+
+        # Normalize source_references to a consistent format for HuggingFace dataset compatibility
+        if "source_references" in data and data["source_references"] is not None:
+            source_ref = self.source_references
+
+            # Convert to normalized dict format with 'any' and 'all' keys
+            normalized = {"any": None, "all": None}
+
+            if isinstance(source_ref, str):
+                # Single string -> treat as 'all' (must be present)
+                normalized["all"] = [source_ref]
+            elif isinstance(source_ref, list):
+                # List of strings -> treat as 'all' (all must be present)
+                normalized["all"] = source_ref
+            elif isinstance(source_ref, SourceReferences):
+                # Already in SourceReferences format
+                normalized["any"] = source_ref.any
+                normalized["all"] = source_ref.all
+
+            data["source_references"] = normalized
+
+        return data
+
 
 class CudaCppProblem(Problem):
     type: Literal["cuda_cpp"] = "cuda_cpp"
-
-    arch_list: list[str] = Field(default_factory=list)
 
 
 class CudaPythonProblem(Problem):
@@ -250,11 +311,44 @@ class GradedSolution(BaseModel):
     task_id: str
     passed: bool
     skipped: bool
-    elapsed_time: float
     solution: Solution
     problem: Problem
     build_output: str | None = None
     test_output: str | None = None
+    benchmark_output: str | None = None
+    solution_metrics: PerformanceMetrics | None = None
+    solution_time: float | None = None
+    baseline_metrics: PerformanceMetrics | None = None
+    baseline_time: float | None = None
+    speedup: float | None = None
+
+    @property
+    def sm_throughput(self) -> float | None:
+        """Get average SM throughput from performance metrics."""
+        if self.solution_metrics is None:
+            return None
+        return self.solution_metrics.get_average_sm_throughput()
+
+    @property
+    def dram_throughput(self) -> float | None:
+        """Get average DRAM throughput from performance metrics."""
+        if self.solution_metrics is None:
+            return None
+        return self.solution_metrics.get_average_dram_throughput()
+
+    @property
+    def baseline_sm_throughput(self) -> float | None:
+        """Get average SM throughput from baseline performance metrics."""
+        if self.baseline_metrics is None:
+            return None
+        return self.baseline_metrics.get_average_sm_throughput()
+
+    @property
+    def baseline_dram_throughput(self) -> float | None:
+        """Get average DRAM throughput from baseline performance metrics."""
+        if self.baseline_metrics is None:
+            return None
+        return self.baseline_metrics.get_average_dram_throughput()
 
     @model_validator(mode="before")
     @classmethod
@@ -266,3 +360,8 @@ class GradedSolution(BaseModel):
             solution_adapter = TypeAdapter(Annotated[FileSolution | PatchSolution, Field(discriminator="type")])
             data["solution"] = solution_adapter.validate_python(data["solution"])
         return data
+
+
+Problem.model_rebuild()
+CudaCppProblem.model_rebuild()
+CudaPythonProblem.model_rebuild()

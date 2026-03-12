@@ -1,11 +1,15 @@
+from typing import get_args
+
 import fire
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from compute_eval.data.data_model import ReleaseVersion
+from compute_eval.data.data_model import ReleaseVersion, ValidGroup
 from compute_eval.evaluation import evaluate_functional_correctness
 from compute_eval.generate_completions import generate_samples
 from compute_eval.prompts import SYSTEM_PROMPT
+
+VALID_GROUP_CHOICES = list(get_args(ValidGroup))
 
 
 class EvaluateConfig(BaseModel):
@@ -13,17 +17,25 @@ class EvaluateConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    release: ReleaseVersion = Field(
+        default=ReleaseVersion.V2026_1,
+        description="Release version to evaluate solutions for",
+    )
     solutions_datapack: str = Field(
         default=...,
-        description="Path to the solutions datapack",
+        description="Path to a directory holding solutions datapacks or a single solutions datapack to evaluate.",
     )
     problems_datapack_dir: str = Field(
         default="data/releases/",
         description="Directory where released problem datapacks are stored",
     )
-    allow_execution: bool = Field(
-        default=False,
-        description="Whether to allow execution of untrusted code.  This must be set to True.",
+    mode: str | None = Field(
+        default=None,
+        description="Evaluation execution mode. Must be set to 'docker' or 'local' to allow execution.",
+    )
+    profile_mode: str | None = Field(
+        default=None,
+        description="Profiling mode for performance analysis of problems that support it.  Can be 'cupti', 'ncu', or none.",
     )
     k: int | tuple[int, ...] = Field(
         default=1,
@@ -33,10 +45,6 @@ class EvaluateConfig(BaseModel):
         default=4,
         description="Number of worker threads",
     )
-    results_file: str | None = Field(
-        default=None,
-        description="Path to output results file (defaults to {solutions_datapack's release}-graded-solutions.jsonl if not provided)",
-    )
 
 
 class GenerateConfig(BaseModel):
@@ -45,8 +53,16 @@ class GenerateConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     release: ReleaseVersion = Field(
-        default=ReleaseVersion.V2025_2,
+        default=ReleaseVersion.V2026_1,
         description="Release version to generate solutions for",
+    )
+    include: list[ValidGroup] | None = Field(
+        default=None,
+        description=f"Comma separated list of groups to include when generating solutions. Valid values: {VALID_GROUP_CHOICES}. Mutually exclusive with 'exclude'. If not set, all groups are included.",
+    )
+    exclude: list[ValidGroup] | None = Field(
+        default=None,
+        description=f"Comma separated list of groups to exclude when generating solutions. Valid values: {VALID_GROUP_CHOICES}. Mutually exclusive with 'include'. If not set, no groups are excluded.",
     )
     problems_datapack_dir: str = Field(
         default="data/releases/",
@@ -74,7 +90,11 @@ class GenerateConfig(BaseModel):
     )
     reasoning: str | None = Field(
         default=None,
-        description="Reasoning mode for the model (e.g., 'low', 'medium', 'high' for GPT models, or any value for Claude models to enable extended thinking)",
+        description="Reasoning mode for the model (e.g., 'low', 'medium', 'high'). Mutually exclusive with 'thinking'.",
+    )
+    thinking: bool | None = Field(
+        default=None,
+        description="Whether to enable thinking for the model (if supported). Mutually exclusive with 'reasoning'.",
     )
     temperature: float | None = Field(
         default=None,
@@ -96,6 +116,22 @@ class GenerateConfig(BaseModel):
         default=False,
         description="Include system prompt, prompt, and completion in the output solutions file for debugging",
     )
+
+    @field_validator("include", "exclude", mode="before")
+    @classmethod
+    def coerce_to_list(cls, v):
+        return _process_list_field(cls, v)
+
+
+def _process_list_field(cls, v):
+    if v is None:
+        return None
+    elif isinstance(v, list):
+        return v
+    elif isinstance(v, str):
+        return [item.strip() for item in v.split(",") if item.strip()]
+    else:
+        raise ValueError(f"Invalid value for list field: {v}")
 
 
 def _build_config(

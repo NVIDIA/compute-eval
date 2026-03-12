@@ -1,4 +1,18 @@
 import importlib
+from collections.abc import Callable
+
+# Execution result type.
+#
+# Tuple of (exit_code, timed_out, output)
+EvaluatorRuntimeResult = tuple[int, bool, str]
+
+# Evaluator runtime function type.
+#
+# Callable that takes (command: str, timeout_seconds: float, task_tag: str | None)
+# Returns ExecutionResult
+EvaluatorRuntime = Callable[[str, float, str | None], EvaluatorRuntimeResult]
+
+__all__ = ["EvaluatorRuntime", "EvaluatorRuntimeResult"]
 
 # Load Nvidia internal extensions if available
 try:

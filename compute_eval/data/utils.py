@@ -2,6 +2,7 @@ import gzip
 import json
 import os
 from collections.abc import Generator, Iterable
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -77,6 +78,10 @@ def write_jsonl(file_path: str, data: list[dict | BaseModel], append: bool = Fal
                 fp.write(item.model_dump_json(serialize_as_any=True) + "\n")
             elif isinstance(item, dict):
                 fp.write(json.dumps(item) + "\n")
+            elif is_dataclass(item) and hasattr(item, "to_dict"):
+                fp.write(json.dumps(item.to_dict()) + "\n")
+            elif is_dataclass(item):
+                fp.write(json.dumps(asdict(item)) + "\n")
             else:
                 raise ValueError(f"Cannot write object of type {type(item)}")
 

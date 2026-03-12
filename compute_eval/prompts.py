@@ -43,17 +43,17 @@ Apply appropriate numerical stability practices when needed (e.g., clamp argumen
 
 Reasoning discipline
 
-Think through edge cases and performance internally, but output only the final code files, no analysis or explanations. 
+Think through edge cases and performance internally, but output only the final code files, no analysis or explanations.
 """
 
 _USER_PROMPT = """
 Produce the complete solution as one or more source files that compile with the provided build command. Do not output anything except the code files.
 
 Problem
-Description: 
+Description:
 {prompt}
 
-Build command: 
+Build command:
 {build_command}
 
 Context files:
@@ -65,7 +65,7 @@ Emit only the source files necessary to satisfy the problem (new or modified).
 Only emit files you add or modify. Do not output files that are unchanged, and do not include placeholder blocks saying "no changes" or similar.
 Do not include any test code or references to tests.
 If an interface header is provided (e.g., declares functions to implement), place implementations in a corresponding .cu/.cc source file and include that header.
-Begin your response with the first code block. 
+Begin your response with the first code block.
 """
 
 _CONTEXT_FILES_BLOCK_TEMPLATE = """

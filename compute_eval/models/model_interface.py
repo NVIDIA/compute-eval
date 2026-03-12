@@ -94,7 +94,7 @@ class ModelInterface(ABC):
         """
         Call the chat completions endpoint of the model API.
         """
-        client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+        client = OpenAI(base_url=self.base_url, api_key=self.api_key, timeout=900.0)
         return client.chat.completions.create(**kwargs)
 
     def generate_response(self, system_prompt, prompt, params):
@@ -123,7 +123,10 @@ class ModelInterface(ABC):
             "stream": False,
         }
 
-        if (reasoning := getattr(self, "reasoning", None)) is not None:
+        if params.get("thinking", False):
+            params_dict["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
+
+        if (reasoning := params.get("reasoning", None)) is not None:
             params_dict["reasoning_effort"] = reasoning
 
         # Add optional parameters only if they're not None
@@ -137,7 +140,7 @@ class ModelInterface(ABC):
         if top_p is not None:
             params_dict["top_p"] = top_p
 
-        max_tokens = get_parameter_value("max_tokens", params, 2048)
+        max_tokens = get_parameter_value("max_tokens", params, None)
         if max_tokens is not None:
             params_dict["max_tokens"] = max_tokens
 
