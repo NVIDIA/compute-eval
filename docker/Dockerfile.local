@@ -1,0 +1,145 @@
+# =============================================================================
+# Dockerfile.local — Self-contained image for running the eval harness on any
+# machine with Docker and an NVIDIA GPU
+# =============================================================================
+#
+# PURPOSE:
+#   An all-in-one image that bundles the compute-eval harness together with its
+#   full runtime environment.
+#
+# BUILD (run from repo root):
+#   docker build -f docker/Dockerfile.local -t compute-eval:local .
+#
+# RUN EXAMPLE:
+#   docker run --rm --gpus all \
+#     -v $(pwd)/results:/app/results \
+#     compute-eval:local \
+#     /app/.venv/bin/python -m compute_eval.main evaluate_functional_correctness \
+#     --release=2026-1 \
+#     --solutions_datapack=data/releases/2026-1-baseline-solutions.tar.gz \
+#     --k=1 \
+#     --n_workers=10 \
+#     --mode=local
+#
+# INCLUDED PACKAGES:
+#   - CUDA 13.1.0 development toolchain + cuDNN 9 (pinned)
+#   - cudnn-frontend headers
+#   - Python venv (cuda-python-venv): CuPy, cuda-tile, PyTorch, NumPy, SciPy,
+#     pandas, scikit-learn, matplotlib, numba, nvtx, pytest
+#   - CUPTI-based profiling library (built from compute_eval/cuda_tools/)
+#   - Full compute-eval harness installed via uv into /app/.venv
+#
+# =============================================================================
+
+FROM nvcr.io/nvidia/cuda:13.1.0-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
+
+# =============================================================================
+# System packages
+# =============================================================================
+RUN apt-get update && apt-get install -y \
+    # Basic utilities (from outer)
+    jq \
+    curl \
+    wget \
+    unzip \
+    ca-certificates \
+    build-essential \
+    git \
+    # Python (from outer + cuda-python)
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
+# =============================================================================
+# cuDNN
+# =============================================================================
+RUN apt-get update && \
+    apt-get install -y \
+        libcudnn9-cuda-13=9.20.0.48-1 \
+        libcudnn9-dev-cuda-13=9.20.0.48-1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# cudnn-frontend headers (header-only library)
+RUN git clone --depth 1 --branch main \
+        https://github.com/NVIDIA/cudnn-frontend.git /tmp/cudnn-frontend && \
+    cp -r /tmp/cudnn-frontend/include/* /usr/local/include/ && \
+    rm -rf /tmp/cudnn-frontend
+
+# =============================================================================
+# Python environment for CUDA Python problems
+# =============================================================================
+COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/uv
+
+ENV UV_CACHE_DIR=/root/.cache/uv
+
+RUN uv venv /opt/cuda-python-venv
+
+RUN uv pip install --python /opt/cuda-python-venv/bin/python \
+    cupy-cuda13x \
+    cuda-tile
+
+RUN uv pip install --python /opt/cuda-python-venv/bin/python \
+    --index-url https://download.pytorch.org/whl/cu130 \
+    torch
+
+RUN uv pip install --python /opt/cuda-python-venv/bin/python \
+    --only-binary :all: \
+    numpy \
+    cuda-python \
+    pytest \
+    scipy \
+    pandas \
+    matplotlib \
+    scikit-learn \
+    numba \
+    nvtx
+
+# =============================================================================
+# Profiler library
+# =============================================================================
+COPY compute_eval/cuda_tools/*.h compute_eval/cuda_tools/*.cpp compute_eval/cuda_tools/Makefile /opt/cuda_tools/
+
+RUN cd /opt/cuda_tools && make && \
+    echo "Built profiling library with $(ls *.cpp | wc -l) modules"
+
+ENV CUPTI_LIB=/usr/local/cuda/lib64 \
+    CUPTI_PROFILER_LIB=/opt/cuda_tools/libcuda_profile.so
+
+# =============================================================================
+# Eval harness
+# =============================================================================
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project
+
+COPY . ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen
+
+# =============================================================================
+# Environment setup
+# =============================================================================
+ENV PATH="/opt/cuda-python-venv/bin:/usr/local/cuda/bin:/app/.venv/bin:${PATH}" \
+    PYTHONPATH=/app
+
+ENV LD_LIBRARY_PATH=/opt/cuda_tools:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+
+ENV OPENBLAS_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    NUMEXPR_NUM_THREADS=4 \
+    OMP_NUM_THREADS=4
+
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+WORKDIR /app
+
+CMD ["/bin/bash"]

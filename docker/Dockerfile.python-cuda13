@@ -1,0 +1,113 @@
+# =============================================================================
+# Dockerfile.python-cuda13 — Sandbox image for Python/CUDA 13 evaluation
+# =============================================================================
+#
+# PURPOSE:
+#   This image is the isolated execution sandbox used by DockerEvaluator when
+#   grading Python (CuPy / cuda-python) solutions that require CUDA 13.x.
+#   One container is spun up per solution, runs build/test/benchmark
+#   commands, then is torn down.
+#
+# IMAGE NAME CONVENTION:
+#   compute-eval-python:13.1.0
+#   (pulled from the registry pointed to by $IMAGE_REGISTRY, or nvcr.io/<org>
+#    by default — see compute_eval/utils/eval_utils.py:compute_cuda_image)
+#
+# BUILD (run from repo root so COPY of cuda_tools/ resolves correctly):
+#   docker build -f docker/Dockerfile.python-cuda13 \
+#                -t compute-eval-python:13.1.0 .
+#
+# INCLUDED PACKAGES (differences from the cuda12 variant):
+#   - CuPy (cuda13x) + cuda-tile, cuda-python, NumPy, SciPy, pandas,
+#     scikit-learn, matplotlib, numba, nvtx, pytest
+#   - PyTorch (cu130 wheel)
+#   - CUPTI-based profiling library (built from compute_eval/cuda_tools/)
+#   - uv package manager for fast in-container dependency installs
+#
+# =============================================================================
+
+FROM nvcr.io/nvidia/cuda:13.1.0-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
+
+# Install system packages
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-dev \
+    python3-venv \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
+COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/uv
+
+ENV UV_CACHE_DIR=/root/.cache/uv
+
+# Create base venv
+RUN uv venv /opt/base-venv
+
+# Install CuPy that uses system CUDA
+RUN uv pip install --python /opt/base-venv/bin/python \
+    cupy-cuda13x \
+    cuda-tile
+
+# Install PyTorch for CUDA 12.x (compatible with CUDA 13)
+RUN uv pip install --python /opt/base-venv/bin/python \
+    --index-url https://download.pytorch.org/whl/cu130 \
+    torch
+
+RUN uv pip install --python /opt/base-venv/bin/python \
+    --only-binary :all: \
+    numpy \
+    cuda-python \
+    pytest
+
+RUN uv pip install --python /opt/base-venv/bin/python \
+    --only-binary :all: \
+    scipy \
+    pandas \
+    matplotlib \
+    scikit-learn \
+    numba \
+    nvtx
+
+ENV UV_PYTHON=/opt/base-venv/bin/python \
+    PATH="/opt/base-venv/bin:${PATH}"
+
+# Limit concurrency to reduce memory usage during builds
+ENV UV_CONCURRENT_BUILDS=1 \
+    UV_CONCURRENT_INSTALLS=1 \
+    RAYON_NUM_THREADS=2
+
+# Limit threads for numerical libraries
+ENV OPENBLAS_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    NUMEXPR_NUM_THREADS=4 \
+    OMP_NUM_THREADS=4
+
+WORKDIR /workspace
+
+RUN python --version && \
+    uv --version && \
+    python -c "import cupy; print(f'CuPy {cupy.__version__}')" && \
+    python -c "import numpy; print(f'NumPy {numpy.__version__}')" && \
+    python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}')" && \
+    echo "✓ Base environment ready"
+
+# Copy profiler source files and Makefile
+COPY compute_eval/cuda_tools/*.h compute_eval/cuda_tools/*.cpp compute_eval/cuda_tools/Makefile /opt/cuda_tools/
+
+# Build the profiling library using the Makefile
+# (Makefile auto-detects architecture and CUPTI paths)
+RUN cd /opt/cuda_tools && make && \
+    echo "Built profiling library with $(ls *.cpp | wc -l) modules"
+
+# Set runtime environment for profiling
+ENV CUPTI_LIB=/usr/local/cuda/lib64 \
+    LD_LIBRARY_PATH=/opt/cuda_tools:/usr/local/cuda/lib64:${LD_LIBRARY_PATH} \
+    CUPTI_PROFILER_LIB=/opt/cuda_tools/libcuda_profile.so
+
+CMD ["/bin/bash"]
