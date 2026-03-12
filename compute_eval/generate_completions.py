@@ -16,10 +16,11 @@ import gzip
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import tqdm
 
-from compute_eval.data.data_model import FileSolution, Problem, ReleaseVersion, Solution, SourceFile
+from compute_eval.data.data_model import FileSolution, Problem, ReleaseVersion, Solution, SourceFile, ValidGroup
 from compute_eval.data.utils import read_solutions, write_solutions
 
 from . import get_model_class
@@ -33,7 +34,6 @@ def generate_model_completions(
     problem: Problem,
     model: str,
     base_url: str | None = None,
-    reasoning: str | None = None,
     params: dict | None = None,
     debug: bool = False,
 ) -> Solution:
@@ -45,7 +45,6 @@ def generate_model_completions(
         problem (Problem): The problem object containing the task details.
         model (str): The name of the model to use for generating completions.
         base_url (str, optional): The base URL for the custom model API endpoint.
-        reasoning (str, optional): Reasoning mode for the model (e.g., 'low', 'medium', 'high' for GPT models, or any value for Claude models to enable extended thinking).
         params (dict, optional): Additional parameters to pass to the model invocation.
         debug (bool, optional): Whether to include the system prompt, prompt, and generated completion in the output solution for debugging.
 
@@ -54,11 +53,7 @@ def generate_model_completions(
     """
 
     model_class = get_model_class(model)
-    model_instance: ModelInterface = model_class(
-        model_name=model,
-        base_url=base_url,
-        reasoning=reasoning,
-    )
+    model_instance: ModelInterface = model_class(model_name=model, base_url=base_url)
 
     if params is None:
         params = {}
@@ -93,11 +88,15 @@ def generate_samples(
     model: str,
     base_url: str | None,
     reasoning: str | None,
+    thinking: bool | None,
     temperature: float | None,
     top_p: float | None,
     max_tokens: int | None,
     temp_dir: str | None,
-    debug: bool,
+    output_dir: str | None = None,
+    debug: bool = False,
+    include: list[ValidGroup] | None = None,
+    exclude: list[ValidGroup] | None = None,
 ):
     """
     Generates code completions for a set of problems using a specified model and writes them to a solutions datapack.
@@ -110,12 +109,19 @@ def generate_samples(
         model (str): The name of the model to use for generating completions.
         base_url (str | None): Base URL for the custom model API endpoint.
         reasoning (str | None): Reasoning mode for the model (e.g., 'low', 'medium', 'high' for GPT models, or any value for Claude models to enable extended thinking).
+        thinking (bool | None): Whether to enable extended thinking for models that support it (separate from reasoning modes).
         temperature (float | None): Temperature for generation.
         top_p (float | None): Top-p for generation.
         max_tokens (int | None): Maximum tokens for generation.
         temp_dir (str | None): Temporary directory to store intermediate results.
+        output_dir (str | None): Directory to store the final solutions datapack -- if None, uses current directory.
         debug (bool): Whether to include the system prompt, prompt, and generated completion in the output solution for debugging.
+        include (list[ValidGroup] | None): List of groups to include when generating solutions. Mutually exclusive with 'exclude'.
+        exclude (list[ValidGroup] | None): List of groups to exclude when generating solutions. Mutually exclusive with 'include'.
     """
+
+    if reasoning is not None and thinking:
+        raise ValueError("Cannot specify both 'reasoning' and 'thinking' parameters, they are mutually exclusive.")
 
     def _task_id_to_filename(directory: str, _id: str) -> str:
         return f"{directory}/{_id.replace('/', '_')}.jsonl"
@@ -127,12 +133,16 @@ def generate_samples(
         os.makedirs(temp_dir)
 
     problem_file = os.path.join(problems_datapack_dir, f"{release.value}-problems.tar.gz")
-    with ProblemDatapack(problem_file) as datapack:
+    with ProblemDatapack(problem_file, include=include, exclude=exclude) as datapack:
         if datapack.metadata.release != release:
             raise ValueError(
                 f"Problems datapack release {datapack.metadata.release} does not match expected release {release}."
             )
         problems = list(datapack.read_items())
+        groups = datapack.groups
+
+    if groups is not None:
+        print(f"Filtered to {len(problems)} problems for groups: '{groups}'")
 
     task_count = {p.task_id: _count_lines(_task_id_to_filename(temp_dir, p.task_id)) for p in problems}
 
@@ -149,6 +159,8 @@ def generate_samples(
 
             for _ in range(solutions_to_generate):
                 params = {
+                    "reasoning": reasoning,
+                    "thinking": thinking,
                     "temperature": temperature,
                     "top_p": top_p,
                     "max_tokens": max_tokens,
@@ -158,7 +170,6 @@ def generate_samples(
                     "problem": problem,
                     "model": model,
                     "base_url": base_url,
-                    "reasoning": reasoning,
                     "params": params,
                     "debug": debug,
                 }
@@ -187,10 +198,13 @@ def generate_samples(
         raise ValueError("Sample generation incomplete")
 
     model = model.replace("/", "-") if model else None
+    output_dir = Path(output_dir if output_dir else ".")
+    solution_file = f"{release.value}-{model}-solutions.tar.gz" if model else f"{release.value}-solutions.tar.gz"
     SolutionDatapack.create(
-        file_path=f"{release.value}-{model}-solutions.tar.gz" if model else f"{release.value}-solutions.tar.gz",
+        file_path=output_dir / solution_file,
         items=all_results,
         release=release,
+        groups=groups,
     )
 
     # Clean up temporary files
@@ -221,8 +235,9 @@ def _count_lines(filename: str) -> int:
 
 
 _CODE_BLOCK_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL | re.MULTILINE)
-_FIRST_LINE_PATH_RE = re.compile(r"^(?://|#|;)\s*file:\s*([A-Za-z0-9._/\-]+)\s*$", re.IGNORECASE)
-_FIRST_LINE_BLOCK_COMMENT_PATH_RE = re.compile(r"^\s*/\*\s*file:\s*(.+?)\s*\*/\s*$", re.IGNORECASE)
+_FIRST_LINE_PATH_RE = re.compile(r"^(?://|#|;)\s*(?:file:\s*)?([A-Za-z0-9._/\-]+)\s*$", re.IGNORECASE)
+
+_FIRST_LINE_BLOCK_COMMENT_PATH_RE = re.compile(r"^\s*/\*\s*(?:file:\s*)?(.+?)\s*\*/\s*$", re.IGNORECASE)
 
 
 def _normalize_newlines(s: str) -> str:
@@ -279,7 +294,7 @@ def _process_code_block(block: str) -> SourceFile | None:
         return None
 
     return SourceFile(
-        path="solution.cu",
+        path=path,
         content="\n".join(lines[1:]),
     )
 

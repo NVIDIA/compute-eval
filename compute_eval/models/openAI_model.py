@@ -22,13 +22,11 @@ class OpenAIModel(ModelInterface):
         self,
         model_name: str,
         base_url: str | None,
-        reasoning: str | None = None,
     ):
         dotenv.load_dotenv()
 
         self._model_name = model_name
         self._base_url = base_url or "https://api.openai.com/v1"
-        self.reasoning = reasoning
 
         self._api_key_name = None
 

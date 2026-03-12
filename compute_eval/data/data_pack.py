@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Generator, Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, get_args
 
 from pydantic import BaseModel, Field, TypeAdapter
 
@@ -20,6 +20,7 @@ from compute_eval.data.data_model import (
     Problem,
     ReleaseVersion,
     Solution,
+    ValidGroup,
 )
 
 
@@ -32,6 +33,10 @@ class DatapackMetadata(BaseModel):
 
 class ProblemDatapackMetadata(DatapackMetadata):
     task_id_hashes: dict[str, str] = Field(default_factory=dict)
+
+
+class SolutionDatapackMetadata(DatapackMetadata):
+    groups: list[ValidGroup] | None = None
 
 
 class Datapack(ABC):
@@ -109,6 +114,7 @@ class Datapack(ABC):
         items: Iterable[BaseModel],
         release: ReleaseVersion,
         description: str | None = None,
+        **metadata_kwargs,
     ):
         file_path = Path(os.path.expanduser(file_path))
 
@@ -122,6 +128,7 @@ class Datapack(ABC):
                     total_count=0,
                     created_at=datetime.now().isoformat(),
                     description=description,
+                    **metadata_kwargs,  # type: ignore
                 )
 
                 for item in items:
@@ -145,18 +152,51 @@ class Datapack(ABC):
 class ProblemDatapack(Datapack):
     _metadata_class = ProblemDatapackMetadata
     _data_filename = "problems.jsonl"
+    _adapter = TypeAdapter(Annotated[CudaCppProblem | CudaPythonProblem, Field(discriminator="type")])
 
-    def __init__(self, path: str | Path):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        include: list[ValidGroup] | None = None,
+        exclude: list[ValidGroup] | None = None,
+    ):
         super().__init__(path)
+
+        if include and exclude:
+            raise ValueError("Cannot specify both include_groups and exclude_groups")
+
+        all_groups: set[ValidGroup] = set(get_args(ValidGroup))
+
+        if include:
+            self._groups = set(include)
+        elif exclude:
+            self._groups = all_groups - set(exclude)
+        else:
+            self._groups = all_groups
 
     @property
     def metadata(self) -> ProblemDatapackMetadata:
         return super().metadata  # type: ignore
 
+    @property
+    def groups(self) -> set[ValidGroup]:
+        return self._groups
+
     def read_items(self) -> Generator[Problem, None, None]:
-        adapter = TypeAdapter(Annotated[CudaCppProblem | CudaPythonProblem, Field(discriminator="type")])
-        for item in self._stream():
-            yield adapter.validate_python(item)
+        """
+        Read problems from the datapack, optionally filtering by group(s) if specified at initialization.
+
+        Yields:
+            Problem objects, filtered by group if specified at initialization.
+        """
+
+        def _filter(p: Problem) -> bool:
+            if self._groups is None:
+                return True
+            return p.group in self._groups
+
+        yield from filter(_filter, (self._adapter.validate_python(item) for item in self._stream()))
 
     @classmethod
     def _write_item(cls, item: Problem, file, metadata: ProblemDatapackMetadata) -> str:
@@ -171,12 +211,18 @@ class ProblemDatapack(Datapack):
 
 
 class SolutionDatapack(Datapack):
+    _metadata_class = SolutionDatapackMetadata
     _data_filename = "solutions.jsonl"
+    _adapter = TypeAdapter(Annotated[FileSolution | PatchSolution, Field(discriminator="type")])
 
     def __init__(self, path: str | Path):
         super().__init__(path)
 
+    @property
+    def metadata(self) -> SolutionDatapackMetadata:
+        return super().metadata  # type: ignore
+
     def read_items(self) -> Generator[Solution, None, None]:
-        adapter = TypeAdapter(Annotated[FileSolution | PatchSolution, Field(discriminator="type")])
-        for item in self._stream():
-            yield adapter.validate_python(item)
+        for s in (self._adapter.validate_python(item) for item in self._stream()):
+            s.datapack_name = self._path.name.replace("-solutions.tar.gz", "")  # type: ignore
+            yield s
