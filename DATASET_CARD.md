@@ -103,7 +103,6 @@ Each problem is a JSON object with the following schema:
 | `requires_datacenter_gpu` | `boolean` | — | Whether the problem requires a datacenter-class GPU (default: `false`) |
 | `timeout_seconds` | `float` | — | Maximum execution time allowed for tests (in seconds) |
 | `source_references` | `string`, `array`, or `object` | — | Required API calls to verify in solution. Supports `{any: [...], all: [...]}` semantics |
-| `python_version` | `string` | — | Required Python version (`cuda_python` problems only) |
 | `metadata` | `object` | — | Problem metadata: `difficulty`, `tags`, `releases`, `do_not_release` |
 
 #### File Objects (context_files & test_files)

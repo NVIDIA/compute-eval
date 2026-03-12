@@ -101,7 +101,7 @@ class Datapack(ABC):
 
         Returns the written line for use by subclasses.
         """
-        line = item.model_dump_json(serialize_as_any=True, exclude_none=True) + "\n"
+        line = item.model_dump_json(serialize_as_any=True) + "\n"
         file.write(line)
         metadata.total_count += 1
 

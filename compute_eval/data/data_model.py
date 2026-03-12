@@ -199,8 +199,6 @@ class CudaCppProblem(Problem):
 class CudaPythonProblem(Problem):
     type: Literal["cuda_python"] = "cuda_python"
 
-    python_version: str | None = None
-
 
 class Solution(BaseModel, ABC):
     model_config = ConfigDict(extra="allow")
