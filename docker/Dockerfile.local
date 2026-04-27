@@ -132,11 +132,6 @@ ENV PATH="/opt/cuda-python-venv/bin:/usr/local/cuda/bin:/app/.venv/bin:${PATH}" 
 
 ENV LD_LIBRARY_PATH=/opt/cuda_tools:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
-ENV OPENBLAS_NUM_THREADS=4 \
-    MKL_NUM_THREADS=4 \
-    NUMEXPR_NUM_THREADS=4 \
-    OMP_NUM_THREADS=4
-
 ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 

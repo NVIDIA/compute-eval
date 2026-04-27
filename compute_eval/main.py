@@ -8,6 +8,7 @@ from compute_eval.data.data_model import ReleaseVersion, ValidGroup
 from compute_eval.evaluation import evaluate_functional_correctness
 from compute_eval.generate_completions import generate_samples
 from compute_eval.prompts import SYSTEM_PROMPT
+from compute_eval.rag_service import resolve_rag_config
 
 VALID_GROUP_CHOICES = list(get_args(ValidGroup))
 
@@ -116,6 +117,10 @@ class GenerateConfig(BaseModel):
         default=False,
         description="Include system prompt, prompt, and completion in the output solutions file for debugging",
     )
+    rag: str | None = Field(
+        default=None,
+        description="RAG retrieval. Pass a URL (http/https) for single-server config, or a path to a YAML config file.",
+    )
 
     @field_validator("include", "exclude", mode="before")
     @classmethod
@@ -152,7 +157,13 @@ def _build_config(
 
 def generate_samples_with_config(config_file: str | None = None, **cli_kwargs):
     config = _build_config(config_file, GenerateConfig, cli_kwargs)
-    generate_samples(**config.model_dump())
+    kwargs = config.model_dump()
+
+    rag_value = kwargs.pop("rag", None)
+    if rag_value is not None:
+        kwargs["rag_config"] = resolve_rag_config(rag_value)
+
+    generate_samples(**kwargs)
 
 
 def evaluate_functional_correctness_with_config(config_file: str | None = None, **cli_kwargs):

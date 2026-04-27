@@ -1,5 +1,6 @@
 import contextlib
 import itertools
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from compute_eval import EvaluatorRuntime, EvaluatorRuntimeResult
 from compute_eval.data.data_model import Problem
 from compute_eval.evaluators import SolutionEvaluator
 from compute_eval.profilers import PerformanceProfiler
-from compute_eval.utils.eval_utils import GpuInfo, compute_cuda_image, parse_gpu_info
+from compute_eval.utils.eval_utils import GpuInfo, get_cuda_image, parse_gpu_info
 from docker.errors import APIError, ContainerError, ImageNotFound
 from docker.types import DeviceRequest
 
@@ -109,7 +110,7 @@ class DockerEvaluator(SolutionEvaluator):
     ) -> "DockerEvaluator":
         """Create DockerEvaluator from configuration."""
         language = "cpp" if problem.type == "cuda_cpp" else "python"
-        cuda_image = compute_cuda_image(problem.min_cuda_toolkit, language)
+        cuda_image = get_cuda_image(language)
         docker_client = docker.from_env()
 
         # Ensure that we only pull one image at a time in multi-threaded scenarios
@@ -150,6 +151,9 @@ class DockerEvaluator(SolutionEvaluator):
                     working_dir="/workspace",
                     # Volume mount (only workspace is accessible)
                     volumes={str(workdir.absolute()): {"bind": "/workspace", "mode": "rw"}},
+                    # Run as host user so files created in /workspace are owned by the host UID/GID,
+                    # allowing TemporaryDirectory cleanup to delete them without root.
+                    user=f"{os.getuid()}:{os.getgid()}",
                     # GPU access
                     device_requests=[DeviceRequest(device_ids=[str(self.gpu_id)], capabilities=[["gpu"]])],
                     # Network isolation - enabled during only build
@@ -163,10 +167,6 @@ class DockerEvaluator(SolutionEvaluator):
                     # Security options
                     security_opt=["no-new-privileges:true"],  # Prevent privilege escalation
                     cap_drop=["ALL"],  # Drop all capabilities
-                    cap_add=[
-                        "CHOWN",  # Allow for the container to change file ownership (only in the workspace)
-                        "DAC_OVERRIDE",  # Bypass file permission checks (only in the workspace)
-                    ],
                     # Prevent container from gaining additional privileges
                     privileged=False,
                     auto_remove=False,

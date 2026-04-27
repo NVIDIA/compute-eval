@@ -27,6 +27,7 @@ from . import get_model_class
 from .data.data_pack import ProblemDatapack, SolutionDatapack
 from .models.model_interface import ModelInterface
 from .prompts import to_user_message
+from .rag_service import RAGConfig, retrieve_reference_docs
 
 
 def generate_model_completions(
@@ -36,6 +37,7 @@ def generate_model_completions(
     base_url: str | None = None,
     params: dict | None = None,
     debug: bool = False,
+    rag_config: RAGConfig | None = None,
 ) -> Solution:
     """
     Orchestrate the generation of code completions using the specified model.
@@ -47,6 +49,7 @@ def generate_model_completions(
         base_url (str, optional): The base URL for the custom model API endpoint.
         params (dict, optional): Additional parameters to pass to the model invocation.
         debug (bool, optional): Whether to include the system prompt, prompt, and generated completion in the output solution for debugging.
+        rag_config (RAGConfig, optional): Configuration for MCP-based RAG retrieval to provide reference docs to the model during generation.
 
     Returns:
         solution (Solution): The generated solution object containing the completions.
@@ -58,7 +61,11 @@ def generate_model_completions(
     if params is None:
         params = {}
 
-    prompt = to_user_message(problem)
+    reference_docs = None
+    if rag_config is not None:
+        reference_docs = retrieve_reference_docs(problem.prompt, rag_config)
+
+    prompt = to_user_message(problem, reference_docs=reference_docs)
 
     completion = model_instance.generate_response(system_prompt, prompt, params)
 
@@ -97,6 +104,7 @@ def generate_samples(
     debug: bool = False,
     include: list[ValidGroup] | None = None,
     exclude: list[ValidGroup] | None = None,
+    rag_config: RAGConfig | None = None,
 ):
     """
     Generates code completions for a set of problems using a specified model and writes them to a solutions datapack.
@@ -118,6 +126,7 @@ def generate_samples(
         debug (bool): Whether to include the system prompt, prompt, and generated completion in the output solution for debugging.
         include (list[ValidGroup] | None): List of groups to include when generating solutions. Mutually exclusive with 'exclude'.
         exclude (list[ValidGroup] | None): List of groups to exclude when generating solutions. Mutually exclusive with 'include'.
+        rag_config (RAGConfig | None): Optional configuration for MCP-based RAG retrieval to provide reference docs to the model during generation.
     """
 
     if reasoning is not None and thinking:
@@ -172,6 +181,7 @@ def generate_samples(
                     "base_url": base_url,
                     "params": params,
                     "debug": debug,
+                    "rag_config": rag_config,
                 }
                 future = executor.submit(generate_model_completions, **args)
                 futures.append(future)

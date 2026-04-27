@@ -9,6 +9,7 @@ _ncu_perm_error_shown = False
 _ncu_perm_error_lock = threading.Lock()
 
 NGC_ORG = os.getenv("NGC_ORG", "")
+DOCKER_CTK_VERSION = os.getenv("DOCKER_CTK_VERSION", "13.1.0")
 
 
 @dataclass
@@ -125,19 +126,11 @@ def parse_gpu_info(output: str) -> GpuInfo | None:
     )
 
 
-def compute_cuda_image(cuda_toolkit: str, language: str) -> CudaImage:
-    # TODO: We should generalize this to support more CTK versions
-    def _map_cuda_toolkit(ctk: str) -> str:
-        maj, _, _ = parse_semver(ctk)
-        if maj < 13:
-            return "12.8.0"
-        else:
-            return "13.1.0"
-
+def get_cuda_image(language: str) -> CudaImage:
     if language not in ("cpp", "python"):
         raise ValueError(f"Unsupported language: {language}")
 
-    cuda_toolkit = _map_cuda_toolkit(cuda_toolkit)
+    cuda_toolkit = DOCKER_CTK_VERSION
     ctk_major, ctk_minor, ctk_patch = parse_semver(cuda_toolkit)
 
     registry = os.getenv("IMAGE_REGISTRY", f"nvcr.io/{NGC_ORG}")

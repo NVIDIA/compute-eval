@@ -124,7 +124,12 @@ class ModelInterface(ABC):
         }
 
         if params.get("thinking", False):
-            params_dict["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
+            params_dict["extra_body"] = {
+                "chat_template_kwargs": {
+                    "enable_thinking": True,
+                    "thinking": True,
+                }
+            }
 
         if (reasoning := params.get("reasoning", None)) is not None:
             params_dict["reasoning_effort"] = reasoning

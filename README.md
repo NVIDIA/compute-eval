@@ -6,6 +6,8 @@ ComputeEval provides a growing set of handcrafted CUDA programming challenges â€
 
 The benchmark is under active development with frequent updates. New problems, domain groups, and evaluation capabilities are added in each release â€” see the [changelog](CHANGELOG.md) for details.
 
+For periodic technical write-ups on what we've built, what we've learned, and where we're headed, see the [Engineering Diaries](docs/papers/README.md).
+
 ## Benchmark Structure and Evaluation
 
 ### Problem Organization
