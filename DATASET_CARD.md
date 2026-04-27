@@ -4,6 +4,8 @@
 
 **Homepage:** [github.com/NVIDIA/compute-eval](https://github.com/NVIDIA/compute-eval)
 
+For periodic technical write-ups on what we've built, what we've learned, and where we're headed, see the [Engineering Diaries](docs/papers/README.md).
+
 ---
 
 ## Dataset Overview

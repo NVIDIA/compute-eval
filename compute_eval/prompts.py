@@ -5,6 +5,7 @@ You are a senior CUDA/C/C++ engineer. Produce complete, compilable solutions fro
 
 General
 - You will be given: a problem description, context files (editable), and build environment details (e.g., build command).
+- If reference documentation is provided, use it to inform your solution. Treat it as supplementary context, not as a strict requirement.
 - Hidden tests exist but are not shown. Do not mention tests, do not write test code, and do not add I/O used only for testing.
 - Use only the APIs and contracts specified in the problem and context files. Preserve all provided function signatures exactly.
 - Prefer using only headers already present in the provided codebase. Avoid adding new headers unless strictly necessary and supported by the build command. Do not introduce third-party dependencies.
@@ -58,7 +59,7 @@ Build command:
 
 Context files:
 {context_files_block}
-
+{reference_docs_block}
 Output requirements
 
 Emit only the source files necessary to satisfy the problem (new or modified).
@@ -98,9 +99,16 @@ def _format_context_files_block(context_files: list[SourceFile]) -> str:
     return "".join(blocks)
 
 
-def to_user_message(problem: Problem) -> str:
+def _format_reference_docs_block(reference_docs: str | None) -> str:
+    if not reference_docs:
+        return ""
+    return f"\nReference documentation:\n{reference_docs}\n"
+
+
+def to_user_message(problem: Problem, reference_docs: str | None = None) -> str:
     return _USER_PROMPT.format(
         prompt=problem.prompt,
         build_command=problem.build_command,
         context_files_block=_format_context_files_block(problem.context_files),
+        reference_docs_block=_format_reference_docs_block(reference_docs),
     )

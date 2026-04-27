@@ -55,3 +55,7 @@ CLAUDE.md
 generated_solutions/
 generation_temp/
 logs/generation/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
