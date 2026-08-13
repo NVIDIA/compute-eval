@@ -1,0 +1,43 @@
+name: Release
+
+# Publish a GitHub Release with the built wheel and sdist when a version tag is
+# pushed. Tag creation (maintainers only) is the release gate.
+
+on:
+  push:
+    tags:
+      # CalVer: 2026.1, 2026.2, and prereleases like 2026.1rc1
+      - "[0-9][0-9][0-9][0-9].*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        run: pipx install uv
+
+      - name: Verify the tag matches the package version
+        run: |
+          version="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "$version" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag '${GITHUB_REF_NAME}' does not match the pyproject version '$version'. Bump the version and re-tag."
+            exit 1
+          fi
+
+      - name: Build the wheel and sdist
+        run: uv build
+
+      - name: Create the GitHub Release and attach the artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Release ${GITHUB_REF_NAME}. See CHANGELOG.md for details." \
+            dist/*
