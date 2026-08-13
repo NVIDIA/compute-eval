@@ -1,8 +1,5 @@
 # Makefile for building libcuda_profile.so locally.
 #
-# The canonical build logic lives in hatch_build.py (used during wheel
-# builds).  Keep this file in sync with it.
-#
 # Environment variables (all optional):
 #   CXX          - C++ compiler          (default: g++)
 #   CUDA_HOME    - CUDA toolkit root     (default: /usr/local/cuda)
@@ -20,7 +17,7 @@ else
   CUDA_TARGET := sbsa-linux
 endif
 
-# CUPTI paths — match the fallback logic in hatch_build.py
+# CUPTI paths — auto-detected from CUDA_HOME
 CUPTI_INCLUDE ?= $(firstword $(wildcard \
     $(CUDA_HOME)/targets/$(CUDA_TARGET)/include) \
     $(CUDA_HOME)/include)

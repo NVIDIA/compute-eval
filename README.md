@@ -333,7 +333,13 @@ We are committed to **permanently supporting all previous releases**. Model deve
 
 ### Installation
 
-Install the package using uv:
+Install the released package from PyPI:
+
+```bash
+pip install nvidia-compute-eval
+```
+
+Or, for development from a source checkout, install with uv:
 
 ```bash
 uv sync
