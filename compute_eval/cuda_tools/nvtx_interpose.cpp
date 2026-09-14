@@ -17,28 +17,43 @@ typedef const void* (*nvtxGetExportTable_fn)(uint32_t exportTableId);
 typedef int (*InitializeInjectionNvtx2_fn)(nvtxGetExportTable_fn);
 
 static const unsigned int kPushExIdx = NVTX_CBID_CORE2_DomainRangePushEx;
+static const unsigned int kRegisterStringAIdx = NVTX_CBID_CORE2_DomainRegisterStringA;
 
 typedef int (*nvtxDomainRangePushEx_fn)(nvtxDomainHandle_t,
                                         const nvtxEventAttributes_t*);
+typedef nvtxStringHandle_t (*nvtxDomainRegisterStringA_fn)(nvtxDomainHandle_t,
+                                                           const char*);
 
 static nvtxDomainRangePushEx_fn g_next_nvtxDomainRangePushEx = nullptr;
+static nvtxDomainRegisterStringA_fn g_next_nvtxDomainRegisterStringA = nullptr;
 
 static int OurNvtxDomainRangePushEx(nvtxDomainHandle_t domain,
                                     const nvtxEventAttributes_t* eventAttrib) {
     if (domain == nullptr) {
         // CUPTI does not fire a push callback for null-domain calls.
         // Handle it here so the external correlation ID is pushed before the
-        // application launches any GPU work inside this range.
-        const char* message =
-            (eventAttrib && eventAttrib->messageType == NVTX_MESSAGE_TYPE_ASCII)
-            ? eventAttrib->message.ascii : nullptr;
-        ProfileWrapper::HandleNullDomainPush(message);
+        // application launches any GPU work inside this range. Pass the full
+        // eventAttrib so both ASCII and registered-string messages resolve.
+        ProfileWrapper::HandleNullDomainPush(eventAttrib);
     }
     // For non-null domain, do nothing — CUPTI fires cbid=33 normally.
     // Chain to the next hook (CUPTI's) in all cases.
     return g_next_nvtxDomainRangePushEx
            ? g_next_nvtxDomainRangePushEx(domain, eventAttrib)
            : 0;
+}
+
+static nvtxStringHandle_t OurNvtxDomainRegisterStringA(nvtxDomainHandle_t domain,
+                                                       const char* string) {
+    // Chain first so we learn the handle the real registration assigns. CUPTI
+    // drops the NVTX callback for null-domain registrations — the Python `nvtx`
+    // package registers "bench_region" on the default (null) domain — so we must
+    // intern the handle -> text mapping here rather than in the CUPTI callback.
+    nvtxStringHandle_t handle = g_next_nvtxDomainRegisterStringA
+        ? g_next_nvtxDomainRegisterStringA(domain, string)
+        : nullptr;
+    ProfileWrapper::HandleRegisterString(string, handle);
+    return handle;
 }
 
 extern "C" int InitializeInjectionNvtx2(nvtxGetExportTable_fn getExportTable) {
@@ -68,19 +83,31 @@ extern "C" int InitializeInjectionNvtx2(nvtxGetExportTable_fn getExportTable) {
         return 1; // CUPTI hooks still work; our null-domain hook is absent
     }
 
-    // --- Step 3: hook nvtxDomainRangePushEx in the CORE2 function table ---
+    // --- Step 3: hook nvtxDomainRangePushEx and nvtxDomainRegisterStringA
+    // in the CORE2 function table ---
     NvtxFunctionTable tbl = nullptr;
     unsigned int count = 0;
     if (etbl->GetModuleFunctionTable(NVTX_CB_MODULE_CORE2, &tbl, &count) == 1
-        && tbl && count > kPushExIdx) {
-        NvtxFunctionPointer* slot = tbl[kPushExIdx];
-        if (slot) {
-            // Save whatever is in slot 4 now (CUPTI's hook after Step 1).
-            g_next_nvtxDomainRangePushEx =
-                reinterpret_cast<nvtxDomainRangePushEx_fn>(*slot);
-            // Install our wrapper.
-            *slot = reinterpret_cast<NvtxFunctionPointer>(
-                OurNvtxDomainRangePushEx);
+        && tbl) {
+        if (count > kPushExIdx) {
+            NvtxFunctionPointer* slot = tbl[kPushExIdx];
+            if (slot) {
+                // Save whatever is in the slot now (CUPTI's hook after Step 1).
+                g_next_nvtxDomainRangePushEx =
+                    reinterpret_cast<nvtxDomainRangePushEx_fn>(*slot);
+                // Install our wrapper.
+                *slot = reinterpret_cast<NvtxFunctionPointer>(
+                    OurNvtxDomainRangePushEx);
+            }
+        }
+        if (count > kRegisterStringAIdx) {
+            NvtxFunctionPointer* slot = tbl[kRegisterStringAIdx];
+            if (slot) {
+                g_next_nvtxDomainRegisterStringA =
+                    reinterpret_cast<nvtxDomainRegisterStringA_fn>(*slot);
+                *slot = reinterpret_cast<NvtxFunctionPointer>(
+                    OurNvtxDomainRegisterStringA);
+            }
         }
     }
 

@@ -42,8 +42,10 @@ void Initialize() {
     // Register activity API callbacks
     cuptiActivityRegisterCallbacks(BufferRequested, BufferCompleted);
 
-    // Enable activity kinds
-    cuptiActivityEnable(CUPTI_ACTIVITY_KIND_KERNEL);
+    // Enable activity kinds.
+    // NOTE: KERNEL and CONCURRENT_KERNEL are mutually exclusive in CUPTI —
+    // enabling both is unsupported and can drop/duplicate kernel records. Use
+    // CONCURRENT_KERNEL only (it captures both serial and concurrent launches).
     cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
     cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MEMCPY);
     cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MARKER);
@@ -66,8 +68,12 @@ void Initialize() {
 }
 
 void Finalize() {
-    // Flush all pending activities
-    cuptiActivityFlushAll(0);
+    // Flush all pending activities. FLUSH_FORCED drains the IN-PROGRESS activity
+    // buffer, not just already-completed ones — without it, kernels from a tight
+    // benchmark loop can still be sitting in the active buffer at finalize and
+    // never reach the JSON (they'd only flush at process teardown, too late),
+    // silently under-counting invocations and total kernel time.
+    cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
 
     // Record application end time
     ProfilerState::RecordEndTime();

@@ -37,9 +37,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-from abc import ABC, abstractmethod
 from enum import Enum
-from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -52,11 +50,9 @@ from pydantic import (
 )
 
 from compute_eval.data.metrics_data_model import PerformanceMetrics, ProcessTimingMode, TimingModes
-from compute_eval.utils.parsing import get_most_likely_language
 
 PROBLEM_SCHEMA_VERSION = 2
 SOLUTION_SCHEMA_VERSION = 1
-SOURCE_ENCODING = "utf-8"
 
 
 class ReleaseVersion(str, Enum):
@@ -65,6 +61,7 @@ class ReleaseVersion(str, Enum):
     V2025_2 = "2025-2"
     V2025_3 = "2025-3"
     V2026_1 = "2026-1"
+    V2026_2 = "2026-2"
 
 
 class SourceFile(BaseModel):
@@ -82,6 +79,8 @@ class SourceFile(BaseModel):
 #: - cublas: cuBLAS - Dense linear algebra (BLAS levels 1-3, extensions)
 #: - mathlibs: Math Libraries - cuSPARSE, cuSOLVER, cuFFT, cuRAND
 #: - cutile: cuTile - Tile-based programming with cuTile kernels and patterns
+#: - cutlass: CUTLASS C++ templates, collectives, schedulers, and integrations
+#: - cute-dsl: Python CuTe DSL layouts, tensors, atoms, and kernels
 #: - cudnn: cuDNN - Deep Neural Network library (convolutions, pooling,
 #:   normalization, activations using cuDNN Graph API)
 ValidGroup = Literal[
@@ -91,6 +90,8 @@ ValidGroup = Literal[
     "cublas",
     "mathlibs",
     "cutile",
+    "cutlass",
+    "cute-dsl",
     "cudnn",
 ]
 
@@ -125,7 +126,7 @@ class SourceReferences(BaseModel):
         return self
 
 
-class Problem(BaseModel, ABC):
+class Problem(BaseModel):
     type: Literal["cuda_cpp", "cuda_python"]
     schema_version: int = Field(default=PROBLEM_SCHEMA_VERSION)
 
@@ -143,6 +144,13 @@ class Problem(BaseModel, ABC):
     build_command: str | None = None
     test_command: str
     benchmark_command: str | None = None
+
+    #: Optional fully-qualified container image to evaluate this problem in
+    #: (e.g. "nvcr.io/nvidia/cuda:13.0.1-devel-ubuntu24.04"). When set, the
+    #: PodmanEvaluator runs build/test/benchmark inside this image instead of
+    #: the default compute-eval image. Local evaluators ignore this field.
+    #: Defaults to None (use the standard compute-eval image).
+    base_image: str | None = None
 
     timing_mode: TimingModes = Field(
         default_factory=ProcessTimingMode, description="Method for extracting performance timing from metrics"
@@ -200,24 +208,12 @@ class CudaPythonProblem(Problem):
     type: Literal["cuda_python"] = "cuda_python"
 
 
-class Solution(BaseModel, ABC):
+class Solution(BaseModel):
     model_config = ConfigDict(extra="allow")
     schema_version: int = Field(default=SOLUTION_SCHEMA_VERSION)
 
     type: Literal["file", "patch"]
     task_id: str
-
-    @abstractmethod
-    def validate(self, problem: Problem) -> bool:
-        pass
-
-    @abstractmethod
-    def setup_workspace(self, work_dir: Path):
-        pass
-
-    @abstractmethod
-    def verify_source_references(self, source_references: str | list[str] | SourceReferences | None) -> bool:
-        pass
 
     @model_validator(mode="before")
     @classmethod
@@ -234,75 +230,48 @@ class FileSolution(Solution):
 
     files: list[SourceFile] = Field(default_factory=list)
 
-    def validate(self, problem: Problem) -> bool:
-        if self.task_id != problem.task_id:
-            return False
-        if not self.files:
-            return False
-        return not {f.path for f in self.files} & {tf.path for tf in problem.test_files}
-
-    def setup_workspace(self, work_dir: Path):
-        for file in self.files:
-            file_path = work_dir / file.path
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(file.content)
-
-    def verify_source_references(self, source_references: str | list[str] | SourceReferences | None) -> bool:
-        if source_references is None:
-            return True
-
-        # Parse the source_references format
-        all_refs: list[str] = []
-        any_refs: list[str] = []
-
-        if isinstance(source_references, str):
-            all_refs = [source_references]
-        elif isinstance(source_references, list):
-            all_refs = source_references
-        elif isinstance(source_references, SourceReferences):
-            if source_references.all is not None:
-                all_refs = source_references.all
-            if source_references.any is not None:
-                any_refs = source_references.any
-
-        if not all_refs and not any_refs:
-            return True
-
-        all_remaining = {ref.encode(SOURCE_ENCODING) for ref in all_refs}
-        any_remaining = {ref.encode(SOURCE_ENCODING) for ref in any_refs}
-
-        for file in self.files:
-            encoded_content = file.content.encode(SOURCE_ENCODING)
-            language = get_most_likely_language(file.path, encoded_content)
-            if language is not None:
-                for ref, _ in language.find_matching_subtrees(encoded_content, all_remaining | any_remaining):
-                    all_remaining.discard(ref)
-                    if ref in any_remaining:
-                        any_remaining.clear()
-
-                    if not all_remaining and not any_remaining:
-                        return True
-
-        return not all_remaining and not any_remaining
-
 
 class PatchSolution(Solution):
     type: Literal["patch"] = "patch"
 
     patch: str
 
-    def validate(self, problem: Problem) -> bool:
-        if self.task_id != problem.task_id:
-            return False
-        return self.patch is not None
 
-    def setup_workspace(self, work_dir: Path):
-        # TODO: Apply the patch to the files in work_dir
-        pass
+class SanitizerTool(str, Enum):
+    MEMCHECK = "memcheck"
+    RACECHECK = "racecheck"
+    SYNCCHECK = "synccheck"
+    INITCHECK = "initcheck"
 
-    def verify_source_references(self, source_references: str | list[str] | SourceReferences | None) -> bool:
-        # TODO: Need to fully implement patch solutions.
-        return True
+
+class SanitizerStatus(str, Enum):
+    PASSED = "passed"
+    FAILED = "failed"
+    INVALID = "invalid"
+
+
+class SanitizerToolResult(BaseModel):
+    tool: SanitizerTool
+    status: SanitizerStatus
+    command: str
+    return_code: int
+    timed_out: bool
+    wall_seconds: float
+    target_coverage_confirmed: bool
+    reason: str | None = None
+    target_output: str
+    raw_log: str | None = None
+    raw_log_sha256: str | None = None
+
+
+class SanitizerResult(BaseModel):
+    status: SanitizerStatus
+    selected_tools: list[SanitizerTool]
+    tool_results: list[SanitizerToolResult]
+    reason: str | None = None
+    post_test_output: str | None = None
+    post_test_return_code: int | None = None
+    post_test_timed_out: bool = False
 
 
 class GradedSolution(BaseModel):
@@ -319,6 +288,7 @@ class GradedSolution(BaseModel):
     baseline_metrics: PerformanceMetrics | None = None
     baseline_time: float | None = None
     speedup: float | None = None
+    sanitizer_result: SanitizerResult | None = None
 
     @property
     def sm_throughput(self) -> float | None:

@@ -1,0 +1,23 @@
+task_id: few-shot/pair-transform
+date: '2026-08-17'
+problem_type: cuda_cpp
+group: cuda-runtime
+
+prompt: |
+  Implement `pair_transform` for host arrays. For every index, return both the
+  sum and the difference of the two inputs.
+
+  Keep the declaration in `include/pair_transform.h` unchanged. Allocate device
+  storage, copy both inputs, launch a CUDA kernel, copy both outputs back, and
+  release the storage. Support arbitrary nonnegative counts.
+
+build_command: nvcc -std=c++17 -I include -o test.out solution.cu test/*.cu
+test_command: ./test.out
+timeout_seconds: 30.0
+
+metadata:
+  difficulty: medium
+  tags:
+    - candidate-few-shot
+    - cuda-runtime
+    - multiple-outputs

@@ -1,0 +1,23 @@
+task_id: few-shot/transpose-add
+date: '2026-08-17'
+problem_type: cuda_cpp
+group: cuda-kernels
+
+prompt: |
+  Implement `transpose_add` for a row-major device matrix. Transpose the matrix
+  and add `row * row_scale + column * column_scale` to each value.
+
+  Keep the declaration in `include/transpose_add.h` unchanged. Launch a 2-D
+  CUDA grid on the supplied stream. Support partial blocks and zero-sized
+  matrices.
+
+build_command: nvcc -std=c++17 -I include -o test.out solution.cu test/*.cu
+test_command: ./test.out
+timeout_seconds: 30.0
+
+metadata:
+  difficulty: medium
+  tags:
+    - candidate-few-shot
+    - device-pointers
+    - two-dimensional

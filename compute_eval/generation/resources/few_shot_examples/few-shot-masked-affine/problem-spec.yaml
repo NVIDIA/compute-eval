@@ -1,0 +1,24 @@
+task_id: few-shot/masked-affine
+date: '2026-08-17'
+problem_type: cuda_cpp
+group: cuda-kernels
+
+prompt: |
+  Implement `masked_affine` for device-resident arrays. For each index, write
+  `scale * input[index] + bias` when the mask is nonzero; otherwise copy the
+  input unchanged.
+
+  Keep the declaration in `include/masked_affine.h` unchanged. Use a
+  grid-stride CUDA kernel on the supplied stream. Support arbitrary counts,
+  including zero.
+
+build_command: nvcc -std=c++17 -I include -o test.out solution.cu test/*.cu
+test_command: ./test.out
+timeout_seconds: 30.0
+
+metadata:
+  difficulty: medium
+  tags:
+    - candidate-few-shot
+    - device-pointers
+    - grid-stride

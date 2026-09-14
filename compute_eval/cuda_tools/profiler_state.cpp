@@ -15,6 +15,7 @@ static uint32_t s_next_external_id = 1;
 static std::unordered_map<uint32_t, std::string> s_external_id_to_nvtx_name;
 static std::unordered_map<uint32_t, uint32_t> s_external_id_to_parent_id;
 static std::unordered_map<uint32_t, uint32_t> s_cuda_corr_to_external_id;
+static std::unordered_map<const void*, std::string> s_registered_strings;
 
 static CUpti_SubscriberHandle s_subscriber;
 
@@ -38,12 +39,21 @@ static std::string Demangle(const char* mangled) {
         std::string result(demangled);
         free(demangled);
 
-        // Simplify - extract just the function name
-        size_t paren = result.find('(');
+        // Simplify to just the function name by stripping the argument list.
+        // Use the LAST '(' rather than the first: anonymous-namespace kernels
+        // demangle to "(anonymous namespace)::name(args...)", whose first '(' is
+        // the "(anonymous namespace)" — cutting there yields an EMPTY name and
+        // (with the old first-use guard) perpetually reset the invocation count.
+        size_t paren = result.rfind('(');
         if (paren != std::string::npos) {
             result = result.substr(0, paren);
         }
 
+        // Never return empty — fall back to the mangled name so downstream keying
+        // and display stay meaningful.
+        if (result.empty()) {
+            return std::string(mangled);
+        }
         return result;
     }
 
@@ -72,11 +82,12 @@ void ProfilerState::RecordKernelInvocation(const std::string& mangled_name,
                                            const KernelInvocation& invocation) {
     auto& stats = s_kernel_stats[mangled_name];
 
-    // Initialize on first use
+    // Set the display name once. count/total_duration are zero-initialized by the
+    // struct's default member initializers, so we must NOT reset them here — the
+    // old guard keyed on demangled_name.empty(), which for a kernel whose name
+    // demangled to "" fired on EVERY call and perpetually reset count to 1.
     if (stats.demangled_name.empty()) {
         stats.demangled_name = Demangle(mangled_name.c_str());
-        stats.total_duration_ns = 0;
-        stats.count = 0;
     }
 
     stats.invocations.push_back(invocation);
@@ -192,6 +203,18 @@ std::string ProfilerState::GetNvtxNameForCudaCorrelation(uint32_t cuda_corr_id) 
         return GetNvtxNameForExternalId(it->second);
     }
     return "";
+}
+
+// Registered-string interning
+void ProfilerState::RegisterNvtxString(const void* handle, const std::string& str) {
+    if (handle != nullptr) {
+        s_registered_strings[handle] = str;
+    }
+}
+
+std::string ProfilerState::GetNvtxStringForHandle(const void* handle) {
+    auto it = s_registered_strings.find(handle);
+    return (it != s_registered_strings.end()) ? it->second : "";
 }
 
 // CUPTI subscriber

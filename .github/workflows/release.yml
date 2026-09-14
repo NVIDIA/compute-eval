@@ -1,16 +1,18 @@
 name: Release
 
-# Publish a GitHub Release with the built wheel and sdist when a version tag is
-# pushed. Tag creation (maintainers only) is the release gate.
+# Build the wheel and sdist and publish them as a GitHub Release when a
+# version tag is pushed. Only repository maintainers can push tags, so tag
+# creation is the release gate. Publishing the release artifacts to PyPI is a
+# separate, manual step (via the Kitmaker Portal against the asset URLs below).
 
 on:
   push:
     tags:
-      # CalVer: 2026.1, 2026.2, and prereleases like 2026.1rc1
+      # CalVer tags: 2026.1, 2026.2, 2026.10, and prereleases like 2026.1rc1
       - "[0-9][0-9][0-9][0-9].*"
 
 permissions:
-  contents: write
+  contents: write  # required to create a GitHub Release
 
 jobs:
   release:
@@ -26,7 +28,7 @@ jobs:
         run: |
           version="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
           if [ "$version" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error::Tag '${GITHUB_REF_NAME}' does not match the pyproject version '$version'. Bump the version and re-tag."
+            echo "::error::Tag '${GITHUB_REF_NAME}' does not match the pyproject version '$version'. Bump the version, sync, and re-tag."
             exit 1
           fi
 

@@ -1,5 +1,20 @@
-import importlib
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""compute-eval public API.
+
+Generator authors and other library consumers should import the schema types
+from this package directly (`from compute_eval import Problem`) or from the
+explicit `compute_eval.models` namespace.
+
+Internal modules continue to import from `compute_eval.data.*` — that is the
+implementation location, not the public surface.
+"""
+
 from collections.abc import Callable
+
+from compute_eval.models import *  # noqa: F401, F403  — re-export public schema
+from compute_eval.models import __all__ as _MODELS_ALL
 
 # Execution result type.
 #
@@ -12,23 +27,8 @@ EvaluatorRuntimeResult = tuple[int, bool, str]
 # Returns ExecutionResult
 EvaluatorRuntime = Callable[[str, float, str | None], EvaluatorRuntimeResult]
 
-__all__ = ["EvaluatorRuntime", "EvaluatorRuntimeResult"]
-
-# Load Nvidia internal extensions if available
-try:
-    from compute_eval.internal import MODEL_CLASSES
-
-    def _lazy_load_class(class_path: str):
-        module_path, class_name = class_path.rsplit(".", 1)
-        module = importlib.import_module(module_path)
-        return getattr(module, class_name)
-
-    def get_model_class(model: str):
-        class_path = MODEL_CLASSES.get(model, "compute_eval.models.openAI_model.OpenAIModel")
-        return _lazy_load_class(class_path)
-
-except ImportError:
-    from compute_eval.models.openAI_model import OpenAIModel
-
-    def get_model_class(model: str):
-        return OpenAIModel
+__all__ = [
+    *_MODELS_ALL,
+    "EvaluatorRuntime",
+    "EvaluatorRuntimeResult",
+]

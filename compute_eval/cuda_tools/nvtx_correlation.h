@@ -21,6 +21,11 @@ void CUPTIAPI NvtxCallbackHandler(void* userdata,
 
 // Called from the nvtxDomainRangePushEx LD_PRELOAD interposition for the
 // null-domain case, where CUPTI does not fire a push callback.
-void HandleNullDomainPush(const char* message);
+void HandleNullDomainPush(const nvtxEventAttributes_t* eventAttrib);
+
+// Called from the nvtxDomainRegisterStringA LD_PRELOAD interposition to intern
+// a registered-string handle -> text mapping, so pushes carrying a
+// NVTX_MESSAGE_TYPE_REGISTERED message can be resolved back to a name.
+void HandleRegisterString(const char* string, const void* handle);
 
 } // namespace ProfileWrapper

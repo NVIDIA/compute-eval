@@ -1,4 +1,3 @@
-import os
 import re
 import shutil
 import subprocess
@@ -8,23 +7,12 @@ from dataclasses import dataclass
 _ncu_perm_error_shown = False
 _ncu_perm_error_lock = threading.Lock()
 
-NGC_ORG = os.getenv("NGC_ORG", "")
-DOCKER_CTK_VERSION = os.getenv("DOCKER_CTK_VERSION", "13.1.0")
-
 
 @dataclass
 class GpuInfo:
     num_gpus: int
     compute_capability: tuple[int, int] | None
     is_datacenter_gpu: bool
-
-
-@dataclass
-class CudaImage:
-    image: str
-    ctk_major: int
-    ctk_minor: int
-    ctk_patch: int
 
 
 # noinspection PyBroadException
@@ -76,6 +64,7 @@ def _is_datacenter_gpu(gpu_name: str) -> bool:
         "H100",
         "H200",
         "GH200",
+        "B100",
         "B200",
         "GB200",
         "B300",
@@ -123,22 +112,4 @@ def parse_gpu_info(output: str) -> GpuInfo | None:
         num_gpus=num_gpus,
         compute_capability=compute_capability,
         is_datacenter_gpu=is_datacenter,
-    )
-
-
-def get_cuda_image(language: str) -> CudaImage:
-    if language not in ("cpp", "python"):
-        raise ValueError(f"Unsupported language: {language}")
-
-    cuda_toolkit = DOCKER_CTK_VERSION
-    ctk_major, ctk_minor, ctk_patch = parse_semver(cuda_toolkit)
-
-    registry = os.getenv("IMAGE_REGISTRY", f"nvcr.io/{NGC_ORG}")
-    image_name = f"{registry}/compute-eval-{language}:{cuda_toolkit}"
-
-    return CudaImage(
-        image=image_name,
-        ctk_major=ctk_major,
-        ctk_minor=ctk_minor,
-        ctk_patch=ctk_patch,
     )

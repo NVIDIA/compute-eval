@@ -1,0 +1,178 @@
+# =============================================================================
+# Dockerfile.eval — Sandbox image for all compute-eval problem types
+# =============================================================================
+#
+# PURPOSE:
+#   Single execution sandbox for every problem type:
+#     - cuda_cpp    : C++/CUDA kernels, cuDNN Graph API, CCCL, cuBLAS, mathlibs
+#     - cuda_python : cuTile, CuTe DSL, CuPy, PyTorch, cuda-python, SciPy stack
+#
+#   One ephemeral container is spun up per command (build/test/benchmark) by
+#   PodmanEvaluator with --network=none, then torn down.
+#
+# IMAGE NAME CONVENTION:
+#   compute-eval:<CUDA_VERSION>   e.g. compute-eval:13.1.0
+#   Set IMAGE_REGISTRY (and optionally NGC_ORG) to override the registry;
+#   set CTK_VERSION to select a different tag. See PodmanEvaluator.
+#
+# BUILD (run from repo root):
+#   podman build -f docker/Dockerfile.eval \
+#                -t compute-eval:13.1.0 .
+#
+#   # Override CUDA / cuDNN versions:
+#   podman build -f docker/Dockerfile.eval \
+#                --build-arg CUDA_VERSION=12.8.0 \
+#                --build-arg CUDNN_VERSION=9.20.0.48-1 \
+#                -t compute-eval:12.8.0 .
+#
+# INCLUDED PACKAGES:
+#   - Full CUDA development toolchain (nvcc, etc.) from the base image
+#   - cuDNN runtime + dev + headers (pinned via CUDNN_VERSION build arg)
+#   - cudnn-frontend v1.23.0 (header-only, for cuDNN Graph API problems)
+#   - CUTLASS C++ headers and CuTe DSL, pinned to the same release
+#   - Python 3 + uv package manager
+#   - /opt/cuda-python-venv: CuPy, cuda-tile, CuTe DSL, PyTorch, cuda-python, NumPy,
+#     SciPy, pandas, scikit-learn, matplotlib, numba, nvtx, pytest, pyyaml
+#   - CUPTI-based profiling library (built from compute_eval/cuda_tools/)
+#
+# =============================================================================
+
+ARG CUDA_VERSION=13.1.0
+ARG CUDNN_VERSION=9.20.0.48-1
+ARG UV_VERSION=0.9.5
+ARG CUTLASS_VERSION=4.6.1
+ARG CUTLASS_GIT_SHA=e05f953a5b3d38adc240df2ff928e0421c2abba3
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
+
+ARG CUDA_VERSION
+ARG CUDNN_VERSION
+ARG UV_VERSION
+ARG CUTLASS_VERSION
+ARG CUTLASS_GIT_SHA
+
+LABEL org.opencontainers.image.cutlass.version="${CUTLASS_VERSION}" \
+      org.opencontainers.image.cutlass.revision="${CUTLASS_GIT_SHA}"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
+
+# =============================================================================
+# System packages
+# =============================================================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        python3 \
+        python3-dev \
+        python3-venv \
+        curl \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
+# =============================================================================
+# cuDNN
+# Pin the headers package explicitly so apt cannot silently upgrade it when
+# the -dev package pulls in a newer version as a transitive dependency.
+# =============================================================================
+RUN CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libcudnn9-headers-cuda-${CUDA_MAJOR}=${CUDNN_VERSION} \
+        libcudnn9-cuda-${CUDA_MAJOR}=${CUDNN_VERSION} \
+        libcudnn9-dev-cuda-${CUDA_MAJOR}=${CUDNN_VERSION} \
+    && rm -rf /var/lib/apt/lists/*
+
+# cudnn-frontend headers (header-only, for cuDNN Graph API problems).
+# Pinned to v1.23.0 for reproducibility.
+RUN git clone --depth 1 --branch v1.23.0 \
+        https://github.com/NVIDIA/cudnn-frontend.git /tmp/cudnn-frontend && \
+    cp -r /tmp/cudnn-frontend/include/* /usr/local/include/ && \
+    rm -rf /tmp/cudnn-frontend
+
+# CUTLASS C++ headers. Fetch the immutable commit matching the CuTe DSL wheel;
+# never build an evaluation image from the moving main branch.
+RUN git init /opt/cutlass && \
+    git -C /opt/cutlass remote add origin https://github.com/NVIDIA/cutlass.git && \
+    git -C /opt/cutlass fetch --depth 1 origin ${CUTLASS_GIT_SHA} && \
+    git -C /opt/cutlass checkout --detach FETCH_HEAD && \
+    test "$(git -C /opt/cutlass rev-parse HEAD)" = "${CUTLASS_GIT_SHA}"
+
+# =============================================================================
+# uv package manager
+# =============================================================================
+COPY --from=uv /uv /usr/local/bin/uv
+
+ENV UV_CACHE_DIR=/root/.cache/uv
+
+# =============================================================================
+# Python environment for CUDA Python problems
+# =============================================================================
+RUN uv venv /opt/cuda-python-venv
+
+RUN uv pip install --python /opt/cuda-python-venv/bin/python \
+    cupy-cuda13x \
+    cuda-tile \
+    --only-binary :all: \
+    "nvidia-cutlass-dsl[cu13]==${CUTLASS_VERSION}"
+
+RUN uv pip install --python /opt/cuda-python-venv/bin/python \
+    --index-url https://download.pytorch.org/whl/cu130 \
+    torch
+
+RUN uv pip install --python /opt/cuda-python-venv/bin/python \
+    --only-binary :all: \
+    numpy \
+    cuda-python \
+    pytest \
+    pyyaml \
+    scipy \
+    pandas \
+    matplotlib \
+    scikit-learn \
+    numba \
+    nvtx
+
+# =============================================================================
+# CUPTI-based profiling library
+# =============================================================================
+COPY compute_eval/cuda_tools/*.h compute_eval/cuda_tools/*.cpp compute_eval/cuda_tools/Makefile /opt/cuda_tools/
+
+RUN cd /opt/cuda_tools && make && \
+    echo "Built profiling library with $(ls *.cpp | wc -l) modules"
+
+# =============================================================================
+# Environment
+# =============================================================================
+ENV CUDA_HOME=/usr/local/cuda \
+    CUTLASS_PATH=/opt/cutlass \
+    PATH="/opt/cuda-python-venv/bin:/usr/local/cuda/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/cuda_tools:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}" \
+    UV_PYTHON=/opt/cuda-python-venv/bin/python \
+    CUPTI_LIB=/usr/local/cuda/lib64 \
+    CUPTI_PROFILER_LIB=/opt/cuda_tools/libcuda_profile.so
+
+# Limit concurrency to reduce memory usage during builds
+ENV UV_CONCURRENT_BUILDS=1 \
+    UV_CONCURRENT_INSTALLS=1 \
+    RAYON_NUM_THREADS=2
+
+# Limit threads for numerical libraries
+ENV OPENBLAS_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    NUMEXPR_NUM_THREADS=4 \
+    OMP_NUM_THREADS=4
+
+WORKDIR /workspace
+
+RUN python --version && \
+    uv --version && \
+    python -c "import cupy; print(f'CuPy {cupy.__version__}')" && \
+    python -c "import numpy; print(f'NumPy {numpy.__version__}')" && \
+    python -c "import torch; print(f'PyTorch {torch.__version__}')" && \
+    python -c "from importlib.metadata import version; import cutlass; import cutlass.cute; installed = version('nvidia-cutlass-dsl'); assert installed == '${CUTLASS_VERSION}', installed; print(f'CUTLASS DSL {installed}')" && \
+    echo "✓ Unified environment ready"
+
+CMD ["/bin/bash"]

@@ -35,6 +35,11 @@ celerybeat.pid
 .venv
 env/
 
+# uv lockfile — not committed: compute-eval is a range-pinned library, and an
+# uncommitted lock keeps internal-only deps (see the `internal` dependency
+# group) out of the public release.
+uv.lock
+
 
 # Ignore any generated sample files
 **/*samples*.jsonl
@@ -42,6 +47,9 @@ env/
 
 # Ignore the generated results file
 **/*results.jsonl
+
+# Ignore generated graded-solutions output
+**/*graded-solutions.jsonl
 
 # Ignore pycharm configurations
 .idea/
@@ -55,6 +63,7 @@ CLAUDE.md
 generated_solutions/
 generation_temp/
 logs/generation/
+runs/
 
 # macOS metadata
 .DS_Store

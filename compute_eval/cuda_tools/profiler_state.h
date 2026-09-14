@@ -46,6 +46,14 @@ public:
     static void MapCudaCorrelationToExternal(uint32_t cuda_corr_id, uint32_t external_id);
     static std::string GetNvtxNameForCudaCorrelation(uint32_t cuda_corr_id);
 
+    // Registered-string interning. The Python `nvtx` package (and any NVTX
+    // client using registered strings) passes a message handle rather than an
+    // inline char*: it calls nvtxDomainRegisterStringA once and thereafter
+    // references the returned handle with messageType == NVTX_MESSAGE_TYPE_REGISTERED.
+    // We intercept the registration to map handle -> text so pushes can be resolved.
+    static void RegisterNvtxString(const void* handle, const std::string& str);
+    static std::string GetNvtxStringForHandle(const void* handle);
+
     // Returns the full ancestry chain for a CUDA correlation ID, innermost range first.
     static std::vector<std::string> GetNvtxChainForCudaCorrelation(uint32_t cuda_corr_id);
 

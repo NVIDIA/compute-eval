@@ -2,7 +2,7 @@
 
 A benchmark for evaluating LLM-generated CUDA code on **correctness** and **performance**.
 
-ComputeEval provides a growing set of handcrafted CUDA programming challenges — spanning kernels, runtime APIs, and GPU libraries — along with tooling to generate, compile, and evaluate solutions from any LLM. Each problem includes a held-out test harness for functional correctness and can optionally include a performance benchmark that measures GPU execution time against a baseline solution.
+ComputeEval provides a growing set of handcrafted CUDA programming challenges — spanning kernels, runtime APIs, GPU libraries, and template/DSL kernel authoring — along with tooling to generate, compile, and evaluate solutions from any LLM. Each problem includes a held-out test harness for functional correctness and can optionally include a performance benchmark that measures GPU execution time against a baseline solution.
 
 The benchmark is under active development with frequent updates. New problems, domain groups, and evaluation capabilities are added in each release — see the [changelog](CHANGELOG.md) for details.
 
@@ -41,7 +41,15 @@ Problems are organized into **groups** by domain. Each problem belongs to exactl
 | `cublas` | C++ | BLAS levels 1-3, extensions, applications |
 | `mathlibs` | C++ | cuSPARSE, cuSOLVER, cuFFT, cuRAND |
 | `cudnn` | C++ | Convolutions, attention, matmul, normalization via cuDNN Graph API |
+| `cutlass` | C++ | CUTLASS templates, collectives, schedulers, epilogues, and integration patterns |
 | `cutile` | Python | Tile-based kernels: matmul, attention, normalization, element-wise ops (SM 10.0+) |
+| `cute-dsl` | Python | CuTe DSL layouts, tensors, copy/MMA atoms, pipelines, and custom kernels |
+
+The `cutlass` and `cute-dsl` groups are evaluated against a pinned stack — CUDA Toolkit 13.1 with
+CUTLASS 4.6.1 (C++) and `nvidia-cutlass-dsl` 4.6.1 (Python). Their problem specs declare
+`base_image: compute-eval:13.1.0`, which the Podman evaluator honors automatically. The local
+evaluator ignores `base_image`, so `--mode=local` only works for these groups if you reproduce
+that stack yourself. See [Evaluation Container Image](#evaluation-container-image).
 
 You can use `--include` or `--exclude` to filter by group when generating solutions. For a full coverage map and domain backlog, see [`DOMAIN_MAP.md`](DOMAIN_MAP.md).
 
@@ -61,8 +69,13 @@ build_command: "nvcc -I include -o test.out solution.cu test/*.cu"
 test_command: "./test.out"
 timeout_seconds: 30.0
 
+# Optional: override the container image used by the Podman evaluator.
+# Defaults to null (use localhost/compute-eval:<CTK_VERSION>).
+# Ignored by the local evaluator.
+base_image: null
+
 # Requirements
-min_cuda_toolkit: "12.0"             # Minimum CUDA version required
+min_cuda_toolkit: "13.1"             # Minimum CUDA version required
 
 # Optional metadata
 metadata:
@@ -285,65 +298,136 @@ When evaluating solutions, the `--profile_mode` flag controls which profiler is 
 | `cupti` | Lightweight profiler using CUPTI via `LD_PRELOAD`. Collects kernel timing, memory transfers, and NVTX ranges. Lower overhead, suitable for most workloads. |
 | `ncu` | NVIDIA Nsight Compute profiler. Collects detailed metrics including SM throughput and DRAM throughput percentages. Requires GPU profiling permissions. Higher overhead — reduce `n_workers` to avoid contention. |
 
-### Release Datapacks
+### Problem Distribution
 
-For production use, ComputeEval distributes problems as **datapacks** - versioned, immutable releases stored as compressed tarballs (`.tar.gz`):
-
-```
-data/releases/
-├── 2025-1-problems.tar.gz
-├── 2025-2-problems.tar.gz
-├── 2025-3-problems.tar.gz
-├── 2026-1-problems.tar.gz
-```
-
-#### Datapack Structure
+Released problems are distributed as **datapacks** — versioned archives hosted on the [nvidia/compute-eval](https://huggingface.co/datasets/nvidia/compute-eval) HuggingFace dataset. The evaluation harness downloads and caches them automatically; no manual download is required.
 
 Each datapack contains:
-- **`metadata.json`** - Release version, creation timestamp, problem count, and integrity hashes
-- **`problems.jsonl`** or **`solutions.jsonl`** - One JSON object per line representing each problem/solution
-
-Problems in datapacks are serialized as JSON objects rather than directories. Each problem includes:
-- All fields from `problem-spec.yaml`
-- Embedded `context_files` (list of `{path, content}` objects)
-- Embedded `test_files` (held-out, for evaluation only)
+- **`metadata.json`** — Release version, creation timestamp, problem count, and per-problem integrity hashes
+- **`problems.jsonl`** — One JSON object per line, with all fields from `problem-spec.yaml` plus embedded `context_files` and `test_files`
 
 This format provides:
-- **Immutability** - Released benchmarks never change
-- **Integrity** - MD5 hashes verify problem consistency
-- **Portability** - Self-contained archives easy to distribute
-- **Versioning** - Clear separation between releases
+- **Stable meaning** — A release always contains the same problems, asking the same questions. We fix defects; we never redefine a problem or change a release's problem set. See [Release Support](#release-support).
+- **Integrity** — `metadata.json` records an MD5 per problem, so you can tell exactly which problems changed between two releases
+- **Portability** — Self-contained archives that work offline once cached
 
 #### Release Support
 
-ComputeEval follows a continuous delivery model. New problems and improvements are released regularly as versioned datapacks.
-
-We are committed to **permanently supporting all previous releases**. Model developers can benchmark against any release version to:
+ComputeEval follows a continuous delivery model. We are committed to **permanently supporting all previous releases** so model developers can:
 - Track progress over time against a fixed baseline
 - Compare results with published benchmarks
 - Ensure reproducibility of evaluation results
+
+What supporting a release means in practice:
+
+- **The problem set is fixed.** A shipped release never gains or loses problems. New problems land in the next release; retired problems simply stop appearing in new ones.
+- **Each problem's intent is fixed.** If a problem should become harder or ask something different, it ships as a *new* problem; the original is left alone.
+- **Defects still get fixed.** Ambiguous prompts, buggy headers, and flawed tests are corrected in place and flow into republished archives, so a release measures its stated intent more accurately over time. See [Versioning and Maintenance](DATASET_CARD.md#versioning-and-maintenance).
 
 
 ## Setup
 
 ### Prerequisites
 
-- Python 3.10+
-- NVIDIA GPU with CUDA Toolkit 12 or greater (for evaluation)
+- Python 3.12+
+- NVIDIA GPU
+- [Podman](https://podman.io/) — required for `--mode=podman`, the recommended evaluation mode
+- CUDA Toolkit 13.1 or greater — required only for `--mode=local`; Podman mode provides the toolkit inside the container image
 
 ### Installation
 
-Install the released package from PyPI:
-
 ```bash
+# Evaluation harness (CLI + evaluation framework)
+pip install nvidia-compute-eval[eval]
+
+# Solution generator (CLI + generation framework)
+pip install nvidia-compute-eval[gen]
+
+# Both
+pip install nvidia-compute-eval[all]
+
+# Core data models and datapack API only
 pip install nvidia-compute-eval
 ```
 
-Or, for development from a source checkout, install with uv:
+For development from source:
 
 ```bash
-uv sync
+uv sync --extra eval
+uv sync --extra gen
+# or both:
+uv sync --all-extras
 ```
+
+### Evaluation Modes
+
+The harness runs generated code in one of two modes, selected with the `--mode` flag:
+
+- **`podman` (recommended)** — Executes each solution inside an isolated container built from `docker/Dockerfile.eval`. The image ships the CUDA Toolkit and a prebuilt CUPTI profiler, so functional correctness and CUPTI profiling work with no additional setup. This mode also provides the strongest isolation for untrusted model-generated code.
+- **`local`** — Executes solutions directly on the host. Requires a local CUDA Toolkit installation and, for CUPTI profiling, a compiled profiler library (see [Local CUPTI Profiling](#local-cupti-profiling)).
+
+### Local CUPTI Profiling
+
+CUPTI profiling in `--mode=local` requires the `libcuda_profile.so` shared library. Podman mode builds this automatically inside the container image; for local mode, build it once after installation.
+
+If ComputeEval is installed as a package, build the library in place with the bundled CLI:
+
+```bash
+compute_eval_build_profiler
+```
+
+This compiles `libcuda_profile.so` next to the packaged profiler sources, where the harness locates it automatically. A C++ compiler and the CUDA Toolkit (including the CUPTI headers and libraries) must be available. Set `CUDA_HOME` if the toolkit is not at `/usr/local/cuda`.
+
+When working from a source checkout, build directly with the provided `Makefile`:
+
+```bash
+cd compute_eval/cuda_tools && make
+```
+
+To use a profiler library built elsewhere, point the harness at it explicitly:
+
+```bash
+export CUPTI_PROFILER_LIB=/path/to/libcuda_profile.so
+```
+
+### Evaluation Container Image
+
+Podman mode executes solutions inside an isolated container built from
+`docker/Dockerfile.eval`. Build it locally from the repo root:
+
+```bash
+podman build -f docker/Dockerfile.eval -t compute-eval:13.1.0 .
+```
+
+The harness defaults to `localhost/compute-eval:<CTK_VERSION>`, which
+resolves to the image you just built in Podman's local store — no registry
+login required.
+
+If you prefer to build with Docker, transfer the image to Podman afterwards:
+
+```bash
+docker build -f docker/Dockerfile.eval -t compute-eval:13.1.0 .
+docker save compute-eval:13.1.0 | podman load
+```
+
+To use a different toolkit version or pull from a remote registry, set the
+environment variables before running the harness:
+
+```bash
+# Use a different CUDA toolkit version
+export CTK_VERSION="13.2.0"
+
+# Pull from a remote registry instead of building locally
+export IMAGE_REGISTRY="registry.example.com/my-org"
+```
+
+The full image reference used is `<IMAGE_REGISTRY>/compute-eval:<CTK_VERSION>`.
+
+The image also pins the CUTLASS stack that the `cutlass` and `cute-dsl` problems build
+against: CUTLASS C++ headers at `/opt/cutlass` (exposed as `CUTLASS_PATH`) and the
+`nvidia-cutlass-dsl` wheel, both at 4.6.1. Problems in those groups set
+`base_image: compute-eval:13.1.0` and will not build under `--mode=local` unless you
+reproduce that stack yourself.
 
 ### Pre-commit Hooks
 
@@ -396,118 +480,195 @@ export ANTHROPIC_API_KEY="<your-anthropic-key>"
 
 **Note:** This repository executes machine-generated CUDA code.
 While it's unlikely that the code is malicious, it could still pose potential risks.
-Therefore, all code execution requires the `--mode` flag to be set explicitly to `docker` or `local`.
-We strongly recommend using Docker mode or a sandbox environment (e.g., a virtual machine) when running generated code to minimize security risks.
+Therefore, all code execution requires the `--mode` flag to be set explicitly to `podman` or `local`.
+We strongly recommend using Podman mode or a sandbox environment (e.g., a virtual machine) when running generated code to minimize security risks.
 
-### Using Preset NIM Models
+### Generating Solutions
 
-To generate solutions using NVIDIA-hosted models:
-
-```bash
-uv run compute_eval generate_samples \
-  --release=2026-1 \
-  --base_url=https://integrate.api.nvidia.com/v1 \
-  --model=openai/gpt-oss-120b \
-  --solutions_per_problem=3 \
-  --n_workers=10
-```
-
-**Note:** Set `NEMO_API_KEY` environment variable when using preset NIM models.
-
-This will:
-- Read problems from the 2026-1 release datapack
-- Generate 3 solutions per problem using the `openai/gpt-oss-120b` model
-- Write all solutions to: `2026-1-openai-gpt-oss-120b-solutions.tar.gz`
-
-You can find the list of available models at [NVIDIA NIM Model Catalog](https://build.nvidia.com/models).
-
-### Using OpenAI-Compatible APIs
-
-For models with OpenAI-compatible API endpoints:
+Generate solutions for all problems in a release and write a solutions datapack ready for evaluation.
 
 ```bash
-uv run compute_eval generate_samples \
-  --release=2026-1 \
-  --model=gpt-5 \
-  --solutions_per_problem=3 \
-  --n_workers=10
+# Set your API key (OpenAI, Anthropic, or NVIDIA NIM)
+export OPENAI_API_KEY="<your-key>"
+
+compute_eval_generate generate_samples \
+  --model gpt-5 \
+  --solutions_per_problem 5 \
+  --n_workers 8
 ```
 
-**Note:** Set `OPENAI_API_KEY` environment variable when using custom OpenAI-compatible endpoints.
+For NVIDIA NIM or any other OpenAI-compatible endpoint, pass `--base_url`:
+
+```bash
+export NEMO_API_KEY="<your-nvidia-key>"
+
+compute_eval_generate generate_samples \
+  --model nvidia/nemotron-3-super-120b-a12b \
+  --base_url https://integrate.api.nvidia.com/v1 \
+  --solutions_per_problem 5 \
+  --n_workers 8
+```
 
 This will:
-- Read problems from the 2026-1 release datapack
-- Generate 3 solutions per problem using the `gpt-5` model
-- Write all solutions to: `2026-1-gpt-5-solutions.tar.gz`
+- Load problems for the specified release from the HuggingFace dataset (cached locally after first download)
+- Generate `solutions_per_problem` completions per problem using the specified model
+- Write a solutions datapack (e.g., `2026-2-gpt-5-solutions.tar.gz`) ready for evaluation
 
-### Using Configuration Files
+Generation is resumable — if you interrupt it, re-running with the same arguments picks up where it left off using intermediate files in `--temp_dir`.
 
-You can also use YAML configuration files for convenience:
+Use `--include` or `--exclude` to generate for a subset of groups:
+
+```bash
+compute_eval_generate generate_samples \
+  --model gpt-5 \
+  --include '["thrust", "cub"]'
+```
+
+Parameters can also be supplied via a YAML config file (CLI arguments take precedence):
 
 ```yaml
-# config.yaml
-release: 2026-1
+# gen-config.yaml
+release: "2026-2"
 model: gpt-5
-solutions_per_problem: 3
-n_workers: 10
+solutions_per_problem: 5
+n_workers: 8
 ```
 
 ```bash
-uv run compute_eval generate_samples --config_file=config.yaml
+compute_eval_generate generate_samples --config_file=gen-config.yaml
 ```
 
-CLI arguments override config file values.
+#### Few-shot generation
 
-### Generating and Evaluating Solutions
-
-After generating solutions (see examples above), evaluate them with:
+`compute_eval_generate` is a zero-shot alias over the unified generator. For
+few-shot prompting — where the model is shown completed example problems before
+the target — use the `compute_eval_harness` CLI, which exposes the same
+arguments plus `--num_shots` and `--demonstrations_dir`:
 
 ```bash
-uv run compute_eval evaluate_functional_correctness \
-  --release=2026-1 \
-  --solutions_datapack=2026-1-gpt-5-solutions.tar.gz \
-  --mode=docker \
+compute_eval_harness generate_samples \
+  --model gpt-5 \
+  --num_shots 3 \
+  --demonstrations_dir path/to/demonstrations \
+  --solutions_per_problem 5
+```
+
+The bundled demonstrations shipped with the package can be used directly; omit
+`--demonstrations_dir` to keep `--num_shots 0` (zero-shot). The unified CLI also
+supports raw text-completion endpoints (`--api_mode completion`) and custom stop
+sequences (`--stop`). It writes both the solutions datapack and the scored
+target-subset problems datapack (named with the seed and problem count).
+
+#### Agent-based generation (`harbor`)
+
+The generators above issue a single prompt per problem. To instead let a coding
+agent work a problem inside a sandboxed container — reading files, compiling,
+and iterating — use the `harbor` subcommand:
+
+```bash
+compute_eval_harness harbor generate \
+  --agent claude-code \
+  --model <model-id> \
+  --docker-image compute-eval-harbor-agent:latest \
+  --attempts 1 \
+  --concurrency 4
+```
+
+`--docker-image` is required and is used verbatim, so the image must ship the
+full solve toolchain (compilers, profilers, and the agent CLI). Build
+`docker/harbor-agent/Dockerfile` for a working default. Supported agents are
+`claude-code` (default) and `opencode`; OpenCode additionally accepts
+`--opencode-config` and requires a model.
+
+Passing `--allow-host` puts the task on Harbor's allowlist network policy,
+restricting agent egress to the hostnames, wildcards, IPs, or CIDRs you name
+(repeatable). Without it no allowlist is applied, so the agent inherits the
+container runtime's default network access. Use `--forward-env` to pass named
+environment variables through to the agent — useful for credentials a mounted
+`--skills-dir` needs.
+
+Useful execution flags: `--attempts` (agent attempts per problem),
+`--concurrency` (parallel trials), `--timeout` (seconds per agent, default
+1800), `--gpus` (per task; `0` for CPU-only debugging), `--max-retries` with
+`--retry-include`, `--limit`, and `--resume` to continue an interrupted run.
+Problems come from `--release` by default, or from `--problems` to point at a
+local datapack or YAML source directory.
+
+The run writes `<release>-<model>-solutions.tar.gz` alongside per-run
+`-harbor-usage.jsonl` and `-harbor-trajectories.tar.gz` artifacts, so token
+usage and full agent transcripts are recoverable after the fact. The solutions
+datapack is evaluated exactly like any other.
+
+##### Optimize mode
+
+`harbor optimize` targets performance rather than initial correctness. The agent
+receives the full problem context, including test files, and starts from the
+known-good baseline solution already placed in its workspace; its job is to make
+it faster. Problems without a `benchmark_command` are skipped, since there is
+nothing to measure a speedup against. Output is suffixed `-optimize-solutions.tar.gz`.
+
+```bash
+compute_eval_harness harbor optimize \
+  --agent claude-code \
+  --model <model-id> \
+  --docker-image compute-eval-harbor-agent:latest
+```
+
+### Evaluating Solutions
+
+```bash
+compute_eval evaluate_functional_correctness \
+  --release=2026-2 \
+  --solutions_datapack=2026-2-gpt-5-solutions.tar.gz \
+  --mode=podman \
   --k='(1, 3)' \
   --n_workers=4
 ```
 
-**Security Note:** You must pass `--mode=docker` (or `--mode=local`) to run the evaluation. As described in the Evaluation Rules of Engagement section, this executes untrusted model-generated code, so use appropriate sandboxing. Docker mode is recommended.
+**Security Note:** You must pass `--mode=podman` (or `--mode=local`) to run the evaluation. As described in the Evaluation Rules of Engagement section, this executes untrusted model-generated code, so use appropriate sandboxing. Podman mode is recommended.
 
 This will:
-- Read the problems and solutions datapacks
+- Load problems for the specified release from the HuggingFace dataset (cached locally after first download)
 - Build and execute each solution in an isolated workspace with the test harness
 - Output structured JSON with `pass@k` metrics and problem count
-- Write results to a graded solutions file (auto-named per datapack, e.g., `2026-1-gpt-5-graded-solutions.jsonl`)
+- Write results to a graded solutions file (auto-named per datapack, e.g., `2026-2-gpt-5-graded-solutions.jsonl`)
 
 **Note:** The `k` parameter can be a single integer (`--k=1`) or a tuple (`--k='(1, 3)'`). For accurate pass@k estimates, ensure `max(k) <= solutions_per_problem`.
 
+### Batch Evaluation
+
+Pass a directory instead of a single file to evaluate multiple solution datapacks at once:
+
+```bash
+compute_eval evaluate_functional_correctness \
+  --release=2026-2 \
+  --solutions_datapack=./solutions/ \
+  --mode=podman \
+  --k=1 \
+  --n_workers=4
+```
+
+All `*-solutions.tar.gz` files in the directory will be evaluated and each produces a separate graded-solutions file.
+
+### Using a Config File
+
+Parameters can be provided via a YAML config file (CLI arguments take precedence):
+
+```yaml
+# eval-config.yaml
+release: "2026-2"
+mode: podman
+k: 1
+n_workers: 4
+```
+
+```bash
+compute_eval evaluate_functional_correctness \
+  --config_file=eval-config.yaml \
+  --solutions_datapack=2026-2-gpt-5-solutions.tar.gz
+```
+
 ## Command Reference
-
-### `generate_samples`
-
-Generates solutions for all problems in a release datapack using a specified model or custom API endpoint.
-
-#### Configuration Parameters
-
-All parameters can be specified in a YAML config file or passed as CLI arguments (CLI arguments take precedence).
-
-- `release` (str): Release version to generate solutions for (e.g., "2025-3") (default: "2026-1")
-- `include` (list[str] | None): Comma-separated list of groups to include (e.g., `"cuda-kernels,cublas"`). Mutually exclusive with `exclude`. If not set, all groups are included. (default: None)
-- `exclude` (list[str] | None): Comma-separated list of groups to exclude. Mutually exclusive with `include`. If not set, no groups are excluded. (default: None)
-- `problems_datapack_dir` (str): Directory where released problem datapacks are stored (default: "data/releases/")
-- `solutions_per_problem` (int): Number of solutions to generate per problem (default: 1)
-- `n_workers` (int): Number of worker threads to use (default: 10)
-- `system_prompt` (str): System prompt for the model (default: predefined CUDA programming prompt)
-- `model` (str): Model to use (use an appropriate NIM or use an OpenAI model name) (required)
-- `base_url` (str | None): Custom API base URL (default: None)
-- `reasoning` (str | None): Reasoning level for OpenAI models (e.g., "low", "medium", "high") (default: None)
-- `temperature` (float): Sampling temperature for generation (default: 1.0)
-- `top_p` (float): Nucleus sampling parameter (default: Model dependent)
-- `max_tokens` (int | None): Maximum tokens to generate (default: None, model dependent)
-- `temp_dir` (str | None): Temporary directory for intermediate results (default: None)
-- `debug` (bool): Include system prompt, prompt, and completion in output for debugging (default: False)
-
-**Note**: `model` must be specified.
 
 ### `evaluate_functional_correctness`
 
@@ -517,37 +678,79 @@ Evaluates the functional correctness of generated solutions by compiling and exe
 
 All parameters can be specified in a YAML config file or passed as CLI arguments (CLI arguments take precedence).
 
-- `release` (str): Release version to evaluate solutions for (e.g., "2025-3") (default: "2026-1")
-- `solutions_datapack` (str): Path to a solutions datapack file or a directory containing multiple `*-solutions.tar.gz` files for batch evaluation (required)
-- `problems_datapack_dir` (str): Directory where released problem datapacks are stored (default: "data/releases/")
-- `mode` (str | None): Evaluation execution mode. Must be set to `"docker"` or `"local"` to allow execution (default: None)
-- `k` (int | tuple[int, ...]): K value(s) for pass@k evaluation (default: 1)
-- `n_workers` (int): Number of worker threads (default: 4)
-- `profile_mode` (str | None): Profiling mode for performance analysis. `"cupti"` for lightweight CUPTI profiling, `"ncu"` for NVIDIA Nsight Compute, or `None` (default) to disable profiling. Only affects problems that declare a `benchmark_command`.
+- `release` (str): Release version to evaluate solutions for (e.g., `"2025-3"`). Default: `"2026-2"`
+- `solutions_datapack` (str): Path to a solutions datapack file or a directory containing multiple `*-solutions.tar.gz` files for batch evaluation. **Required.**
+- `problems_source` (str | None): Where to load problems from. When not set, problems are loaded from the [HuggingFace dataset](https://huggingface.co/datasets/nvidia/compute-eval) and cached locally. A `.tar.gz` path opens that datapack directly. Any other path is treated as a directory of YAML problem specs. Default: `None`
+- `mode` (str | None): Evaluation execution mode. Must be set to `"podman"` or `"local"` to allow execution. Default: `None`
+- `k` (int | tuple[int, ...]): K value(s) for pass@k evaluation. Default: `1`
+- `n_workers` (int): Number of worker threads. Default: `4`
+- `profile_mode` (str | None): Profiling mode for performance analysis. `"cupti"` for lightweight CUPTI profiling, `"ncu"` for NVIDIA Nsight Compute, or `None` to disable profiling. Only affects problems that declare a `benchmark_command`. Default: `None`
+- `sanitizer_mode` (str | list[str]): Optional Compute Sanitizer gate. Use `"none"` (default), `"all"`, one tool, or a comma-separated/list subset of `memcheck`, `racecheck`, `synccheck`, and `initcheck`.
+
+#### Compute Sanitizer
+
+Compute Sanitizer is disabled by default. Enable memcheck alone:
+
+```bash
+compute_eval evaluate_functional_correctness \
+  --release=2026-1 \
+  --solutions_datapack=2026-1-my-solutions.tar.gz \
+  --mode=podman \
+  --sanitizer_mode=memcheck
+```
+
+Run any subset with a comma-separated selector, or use `all` for all four tools:
+
+```bash
+--sanitizer_mode=memcheck,racecheck
+--sanitizer_mode=all
+```
+
+A YAML config may use a list:
+
+```yaml
+sanitizer_mode:
+  - memcheck
+  - synccheck
+```
+
+Selected tools always run in the order `memcheck`, `racecheck`, `synccheck`, `initcheck`, regardless of input order. A solution must first pass its normal `test_command`, which then runs under every selected tool. Findings from any tool, including racecheck warnings, fail the sanitizer gate. All selected tools still run so the graded result contains a complete diagnostic record.
+
+The sanitizer gate applies to submitted solutions only. Timing baselines still run their normal correctness and benchmark commands; gold/baseline sanitation belongs in corpus authoring and release validation rather than being repeated for every grading run.
+
+To report a clean sanitizer result, the hidden test must also prove that it exercised the intended workload. During each sanitized run, ComputeEval provides `COMPUTE_EVAL_SANITIZER_REPORT` and `COMPUTE_EVAL_SANITIZER_TOKEN` to the hidden test. After confirming the target launches, the hidden test writes JSON to the report path:
+
+```json
+{"token": "<value from COMPUTE_EVAL_SANITIZER_TOKEN>", "target_launches": 1}
+```
+
+The hidden harness should not pass either variable to candidate-controlled child processes. Candidate stdout is never accepted as coverage proof. Problems that do not yet implement this side channel receive an `invalid` sanitizer result rather than a false clean result: their ordinary correctness result is preserved, but performance benchmarking remains blocked. Missing or malformed coverage, missing sanitizer summaries or logs, and timeouts are all invalid runs. After every tool passes, ComputeEval reruns the normal correctness test before benchmarking.
 
 #### Performance Profiling
 
 To enable performance profiling during evaluation, pass `--profile_mode`:
 
 ```bash
-uv run compute_eval evaluate_functional_correctness \
-  --release=2026-1 \
-  --solutions_datapack=2026-1-gpt-5-solutions.tar.gz \
-  --mode=local \
+compute_eval evaluate_functional_correctness \
+  --release=2026-2 \
+  --solutions_datapack=2026-2-gpt-5-solutions.tar.gz \
+  --mode=podman \
   --profile_mode=cupti \
   --n_workers=2
 ```
 
 When profiling is enabled, problems with a `benchmark_command` will be profiled after passing functional tests. The results include timing, throughput, and optional speedup metrics against baseline solutions.
 
+In `--mode=local`, `--profile_mode=cupti` additionally requires the profiler library to be built (see [Local CUPTI Profiling](#local-cupti-profiling)).
+
 **Using Nsight Compute (`ncu`):**
 
 The `ncu` profiler collects detailed per-kernel metrics (SM throughput, DRAM throughput) but requires GPU profiling permissions and has higher overhead. Reduce `n_workers` (e.g., to 2) to avoid GPU contention.
 
 ```bash
-uv run compute_eval evaluate_functional_correctness \
-  --release=2026-1 \
-  --solutions_datapack=data/releases/2026-1-baseline-solutions.tar.gz \
+compute_eval evaluate_functional_correctness \
+  --release=2026-2 \
+  --solutions_datapack=2026-2-my-solutions.tar.gz \
   --mode=local \
   --profile_mode=ncu \
   --n_workers=2
@@ -570,6 +773,36 @@ uv run compute_eval evaluate_functional_correctness \
   }
 }
 ```
+
+---
+
+### `generate_samples`
+
+Generates solutions for all problems in a release and writes a solutions datapack ready for evaluation with `compute_eval evaluate_functional_correctness`.
+
+Requires `nvidia-compute-eval[gen]` to be installed.
+
+#### Configuration Parameters
+
+All parameters can be specified in a YAML config file or passed as CLI arguments (CLI arguments take precedence).
+
+- `release` (str): Release version to generate solutions for. Default: `"2026-2"`
+- `model` (str): Model name. **Required.** Examples: `"gpt-5"`, `"nvidia/nemotron-3-super-120b-a12b"`
+- `base_url` (str | None): Base URL for the model API. Defaults to the OpenAI API. Default: `None`
+- `problems_source` (str | None): Where to load problems from. When not set, problems are loaded from the [HuggingFace dataset](https://huggingface.co/datasets/nvidia/compute-eval) and cached locally. A `.tar.gz` path opens that datapack directly. Any other path is treated as a directory of YAML problem specs. Default: `None`
+- `solutions_per_problem` (int): Number of solutions to generate per problem. Default: `1`
+- `n_workers` (int): Number of parallel worker threads. Default: `4`
+- `system_prompt` (str): System prompt for the model. Defaults to the built-in CUDA engineer prompt.
+- `reasoning` (str | None): Reasoning effort level. One of `"low"`, `"medium"`, `"high"`. Mutually exclusive with `thinking`. Default: `None`
+- `thinking` (bool | None): Enable extended thinking for models that support it. Mutually exclusive with `reasoning`. Default: `None`
+- `temperature` (float | None): Sampling temperature. Default: `None`
+- `top_p` (float | None): Nucleus sampling probability. Default: `None`
+- `max_tokens` (int | None): Maximum tokens to generate. Default: `None`
+- `temp_dir` (str | None): Directory for intermediate per-problem result files (enables resume). Defaults to the model name. Default: `None`
+- `output_dir` (str | None): Directory for the final solutions datapack. Defaults to the current directory. Default: `None`
+- `debug` (bool): Include raw prompts and completions in the output for debugging. Default: `False`
+- `include` (list | None): Only generate for problems in these groups. Default: `None`
+- `exclude` (list | None): Skip problems in these groups. Default: `None`
 
 ## Dataset
 

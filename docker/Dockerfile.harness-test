@@ -1,0 +1,74 @@
+# =============================================================================
+# Dockerfile.harness-test — Minimal image for running the compute_eval Python
+# test suite (tests/) without pulling in CUDA, Podman, or any inner-container
+# tooling.
+# =============================================================================
+#
+# PURPOSE:
+#   The other Dockerfiles in this repo build heavy images:
+#     - Dockerfile                  -> CI runner with Ubuntu+Podman+NVIDIA toolkit
+#     - docker/Dockerfile.local     -> bundled CUDA 13.1 + PyTorch + harness
+#     - docker/Dockerfile.eval      -> inner compute-eval workspace (all problem types)
+#
+#   None of those are well-suited for quick unit-test iteration on the harness
+#   itself (compute_eval/, tests/). This image is purposefully small: just
+#   Python + uv + the locked dev-group dependencies (pytest, ruff, pre-commit
+#   plus the runtime deps from pyproject.toml). Project source is intentionally
+#   NOT baked in — mount the repo at runtime so edits flow through naturally.
+#
+# BUILD (run from repo root):
+#   docker build -f docker/Dockerfile.harness-test -t compute-eval-harness-test .
+#   # or with podman:
+#   podman build -f docker/Dockerfile.harness-test -t compute-eval-harness-test .
+#
+# RUN EXAMPLE (mount the repo, run pytest against the live source):
+#   podman run --rm -v "$(pwd)":/work -w /work compute-eval-harness-test \
+#     pytest tests/ -v
+#
+#   # Or a single test file:
+#   podman run --rm -v "$(pwd)":/work -w /work compute-eval-harness-test \
+#     pytest tests/test_base_image_plumbing.py -v
+#
+# REBUILD CADENCE:
+#   Rebuild whenever pyproject.toml changes. Source-only edits do not require a
+#   rebuild because the repo is bind-mounted at runtime.
+#
+# =============================================================================
+
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    UV_CACHE_DIR=/root/.cache/uv
+
+# git is the only system-level extra we need: pre-commit (in the dev group)
+# invokes git when its hooks run, and some uv operations on a bind-mounted
+# repo poke at the .git directory.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin uv to the same version Jenkins / Dockerfile.local use for reproducibility.
+COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/uv
+
+# Install deps into /opt/venv (NOT /work) so the bind-mount at runtime
+# doesn't clobber the pre-built venv. --no-install-project skips installing
+# the compute_eval package itself; PYTHONPATH=/work makes it importable from
+# the bind-mounted source instead.
+WORKDIR /opt/build
+COPY *.toml ./
+RUN uv sync --no-install-project --group dev \
+        --python /usr/local/bin/python3 \
+        --project /opt/build \
+    && mv /opt/build/.venv /opt/venv
+
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONPATH=/work \
+    VIRTUAL_ENV=/opt/venv
+
+WORKDIR /work
+
+# Default to dropping into a shell; callers override with `pytest ...`.
+CMD ["/bin/bash"]

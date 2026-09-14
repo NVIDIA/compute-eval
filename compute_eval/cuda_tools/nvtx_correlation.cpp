@@ -11,15 +11,15 @@ namespace ProfileWrapper {
 // whether to call the corresponding CUPTI pop, keeping the two stacks in sync.
 static thread_local std::vector<uint32_t> s_push_stack;
 
-static void push_correlation(const char* message) {
-    if (message) {
+static void push_correlation(const std::string& message, bool has_message) {
+    if (has_message && !message.empty()) {
         uint32_t parent_id = 0;
         for (auto it = s_push_stack.rbegin(); it != s_push_stack.rend(); ++it) {
             if (*it != 0) { parent_id = *it; break; }
         }
 
         uint32_t external_id = ProfilerState::GetNextExternalId();
-        ProfilerState::RegisterExternalId(external_id, std::string(message), parent_id);
+        ProfilerState::RegisterExternalId(external_id, message, parent_id);
         cuptiActivityPushExternalCorrelationId(
             CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM0, external_id);
         s_push_stack.push_back(external_id);
@@ -27,7 +27,7 @@ static void push_correlation(const char* message) {
         if (parent_id != 0) {
             std::string parent_name = ProfilerState::GetNvtxNameForExternalId(parent_id);
             if (!parent_name.empty()) {
-                ProfilerState::SetNvtxRangeParent(std::string(message), parent_name);
+                ProfilerState::SetNvtxRangeParent(message, parent_name);
             }
         }
     } else {
@@ -47,11 +47,45 @@ static void pop_correlation() {
     }
 }
 
+// Resolve an NVTX event message into a string, following the messageType tag.
+// ASCII messages carry an inline char*; REGISTERED messages carry a handle
+// returned by nvtxDomainRegisterStringA, which we interned at registration time.
+// Sets has_message=false only when there is genuinely no usable message.
+static std::string resolve_message(const nvtxEventAttributes_t* attr, bool* has_message) {
+    *has_message = false;
+    if (!attr) return "";
+
+    if (attr->messageType == NVTX_MESSAGE_TYPE_ASCII) {
+        if (attr->message.ascii) {
+            *has_message = true;
+            return std::string(attr->message.ascii);
+        }
+    } else if (attr->messageType == NVTX_MESSAGE_TYPE_REGISTERED) {
+        std::string s = ProfilerState::GetNvtxStringForHandle(attr->message.registered);
+        if (!s.empty()) {
+            *has_message = true;
+            return s;
+        }
+    }
+    return "";
+}
+
 // Called from the nvtxDomainRangePushEx LD_PRELOAD interposition for the
 // null-domain case. CUPTI does not fire a push callback when domain == nullptr
 // so we handle it here instead.
-void HandleNullDomainPush(const char* message) {
-    push_correlation(message);
+void HandleNullDomainPush(const nvtxEventAttributes_t* eventAttrib) {
+    bool has_message = false;
+    std::string message = resolve_message(eventAttrib, &has_message);
+    push_correlation(message, has_message);
+}
+
+// Record a registered-string handle -> text mapping. Called from the
+// nvtxDomainRegisterStringA LD_PRELOAD interposition after the real
+// registration returns the handle.
+void HandleRegisterString(const char* string, const void* handle) {
+    if (string && handle) {
+        ProfilerState::RegisterNvtxString(handle, std::string(string));
+    }
 }
 
 void CUPTIAPI NvtxCallbackHandler(void* userdata,
@@ -101,21 +135,17 @@ void CUPTIAPI NvtxCallbackHandler(void* userdata,
 
     const CUpti_NvtxData* nvtxData = (const CUpti_NvtxData*)cbdata;
 
-    // Helper to extract message from event attributes
-    auto extract_message = [](const nvtxEventAttributes_t* attr) -> const char* {
-        if (attr && attr->messageType == NVTX_MESSAGE_TYPE_ASCII) {
-            return attr->message.ascii;
-        }
-        return nullptr;
-    };
-
     // Handle different NVTX callback types
     switch (cbid) {
         // C API: nvtxRangePushA
         case CUPTI_CBID_NVTX_nvtxRangePushA: {
             const nvtxRangePushA_params_st* params =
                 (const nvtxRangePushA_params_st*)nvtxData->functionParams;
-            push_correlation(params ? params->message : nullptr);
+            if (params && params->message) {
+                push_correlation(std::string(params->message), true);
+            } else {
+                push_correlation("", false);
+            }
             break;
         }
 
@@ -123,7 +153,10 @@ void CUPTIAPI NvtxCallbackHandler(void* userdata,
         case CUPTI_CBID_NVTX_nvtxRangePushEx: {
             const nvtxRangePushEx_params_st* params =
                 (const nvtxRangePushEx_params_st*)nvtxData->functionParams;
-            push_correlation(extract_message(params ? params->eventAttrib : nullptr));
+            bool has_message = false;
+            std::string message = resolve_message(
+                params ? params->eventAttrib : nullptr, &has_message);
+            push_correlation(message, has_message);
             break;
         }
 
@@ -137,7 +170,10 @@ void CUPTIAPI NvtxCallbackHandler(void* userdata,
         case CUPTI_CBID_NVTX_nvtxDomainRangePushEx: {
             const nvtxDomainRangePushEx_params_st* params =
                 (const nvtxDomainRangePushEx_params_st*)nvtxData->functionParams;
-            push_correlation(extract_message(params ? params->core.eventAttrib : nullptr));
+            bool has_message = false;
+            std::string message = resolve_message(
+                params ? params->core.eventAttrib : nullptr, &has_message);
+            push_correlation(message, has_message);
             break;
         }
 

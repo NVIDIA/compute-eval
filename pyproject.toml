@@ -1,32 +1,52 @@
 [project]
 name = "nvidia-compute-eval"
-version = "2026.1"
+version = "2026.2"
 description = "Library for evaluating Large Language Models on CUDA code"
 readme = "README.md"
 authors = [
     { name = "NVIDIA" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
-    "anthropic>=0.72.0",
-    "docker>=7.1.0",
-    "fire>=0.7.1",
-    "h11>=0.16.0",
-    "kubernetes>=34.1.0",
-    "numpy~=2.1.0",
-    "openai>=2.6.1",
+    "huggingface_hub>=0.27.0",
     "pydantic>=2.12.3",
-    "python-dotenv>=1.2.1",
     "pyyaml>=6.0",
-    "requests>=2.32.5",
-    "tabulate>=0.9.0",
+]
+
+[project.optional-dependencies]
+eval = [
+    "fire>=0.7.1",
+    "numpy~=2.1.0",
     "tqdm>=4.67.1",
     "tree-sitter>=0.25.2",
     "tree-sitter-language-pack>=0.10.0",
 ]
+gen = [
+    "anthropic>=0.72.0",
+    "openai>=2.6.1",
+    "python-dotenv>=1.2.1",
+    "requests>=2.32.5",
+    "tqdm>=4.67.1",
+    "fire>=0.7.1",
+    "pyyaml>=6.0",
+    "harbor==0.20.0",
+    "litellm>=1.83.14",
+    "nvidia-ml-py>=12.560.30",
+    "psutil>=6.0.0",
+]
+all = [
+    "nvidia-compute-eval[eval]",
+    "nvidia-compute-eval[gen]",
+]
 
+# Note: CLI entry points require the matching optional extra installed
+# compute_eval requires nvidia-compute-eval[eval]
+# compute_eval_generate and compute_eval_harness require nvidia-compute-eval[gen]
 [project.scripts]
-compute_eval = "compute_eval.main:main"
+compute_eval = "compute_eval.evaluation.cli:main"
+compute_eval_generate = "compute_eval.generation.cli:main"
+compute_eval_harness = "compute_eval.main:main"
+compute_eval_build_profiler = "compute_eval.cuda_tools.build:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -34,9 +54,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["compute_eval"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"data/releases" = "compute_eval/releases"
+exclude = ["compute_eval/internal", "compute_eval/generation/internal"]
 
 [dependency-groups]
 dev = [
@@ -50,7 +68,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py312"
 exclude = ["data/"]
 
 [tool.ruff.lint]
@@ -63,4 +81,6 @@ select = ["E", "F", "UP", "B", "SIM", "I"]
 # SIM118 - checks for key-existence checks against dict.keys() calls
 # SIM300 - constant on the left-hand side of the comparison operator
 # SIM910 - checks for dict.get() calls that pass None as the default value
-ignore = ["E501","UP015","SIM118","SIM300","SIM910"]
+# UP042 - StrEnum: ReleaseVersion is (str, Enum) on purpose; str() of its members
+#         must stay "ReleaseVersion.X", not the value, for release manifest/tag output
+ignore = ["E501","UP015","SIM118","SIM300","SIM910","UP042"]

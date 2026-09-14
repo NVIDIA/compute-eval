@@ -65,9 +65,26 @@ void CUPTIAPI BufferCompleted(CUcontext ctx, uint32_t streamId, uint8_t* buffer,
         // Process kernel records
         else if (record->kind == CUPTI_ACTIVITY_KIND_KERNEL ||
                  record->kind == CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) {
-            CUpti_ActivityKernel4* kernel = (CUpti_ActivityKernel4*)record;
+            // CUPTI 2025.x (CUDA 13.x) emits CUpti_ActivityKernel9/10/11 records.
+            // Casting to the old Kernel4 layout read wrong offsets -> empty name +
+            // garbage/near-zero durations, silently under-counting kernels. Use the
+            // newest struct the headers define (same field names: name/start/end/
+            // correlationId).
+            CUpti_ActivityKernel11* kernel = (CUpti_ActivityKernel11*)record;
 
-            std::string mangled_name(kernel->name);
+            // A well-formed record always carries a kernel name. An empty or null
+            // name means the record itself is corrupt — typically a CUPTI attach/flush
+            // race when the GPU is shared by concurrent processes (no per-GPU
+            // serialization). Substitute a visible, correlation-keyed placeholder so
+            // the corruption is obvious in the output (and greppable) instead of
+            // silently collapsing into a single blank-named "kernel" that skews totals.
+            std::string mangled_name;
+            if (kernel->name != nullptr && kernel->name[0] != '\0') {
+                mangled_name = kernel->name;
+            } else {
+                mangled_name = "<unnamed-kernel corr=" +
+                               std::to_string(kernel->correlationId) + ">";
+            }
             uint64_t duration_ns = kernel->end - kernel->start;
 
             // Build the full ancestry chain: chain[0] = innermost range, chain[n] = outermost
@@ -123,6 +140,13 @@ void CUPTIAPI BufferCompleted(CUcontext ctx, uint32_t streamId, uint8_t* buffer,
                 ProfilerState::UpdateNvtxRangeStats(nvtx_chain[i], 0, rec.duration_ns, rec.bytes);
             }
         }
+    }
+
+    // Surface dropped records — a silent drop under-counts kernels and corrupts
+    // the timing metric. Make it loud rather than invisible.
+    size_t dropped = 0;
+    if (cuptiActivityGetNumDroppedRecords(ctx, streamId, &dropped) == CUPTI_SUCCESS && dropped > 0) {
+        fprintf(stderr, "[CUPTI-WARN] dropped %zu activity records (buffer too small / not flushed)\n", dropped);
     }
 
     free(buffer);

@@ -1,12 +1,12 @@
 # ComputeEval Domain Map
 
-566 problems across 7 groups.
+591 problems across 9 groups.
 
 ---
 
 ## What We Cover
 
-### CUDA C++ (518 problems)
+### CUDA C++ (528 problems)
 
 | Group | Problems | Covers |
 |-------|----------|--------|
@@ -16,14 +16,17 @@
 | `cublas` | 81 | BLAS levels 1–3, extensions, applications |
 | `mathlibs` | 101 | cuSPARSE, cuSOLVER, cuFFT, cuRAND |
 | `cudnn` | 113 | Convolutions, attention, matmul, normalization via cuDNN Graph API |
+| `cutlass` | 10 | CUTLASS templates, collectives, schedulers, epilogues, and integration patterns |
 
-### CUDA Python (48 problems)
+### CUDA Python (63 problems)
 
 | Group | Problems | Covers |
 |-------|----------|--------|
 | `cutile` | 48 | Tile-based kernels: matmul, attention, normalization, element-wise ops (SM 10.0+) |
+| `cute-dsl` | 15 | CuTe DSL layouts, tensors, copy/MMA atoms, pipelines, and custom kernels |
 
-Every problem today is **generation** — write a function or kernel from a specification.
+Most problems are **generation** — write a function or kernel from a specification. The `cutlass` and
+`cute-dsl` groups add 14 **repair** problems: fix a defective or under-performing implementation.
 
 ---
 
@@ -38,7 +41,6 @@ NVIDIA technologies not yet in ComputeEval.
 | Domain | One-liner |
 |--------|-----------|
 | cuBLASLt | Lightweight matmul API with epilogue fusion and algorithm selection |
-| CUTLASS | Templated GEMM/convolution kernels, CuTe layout algebra |
 | cuTENSOR | Tensor contractions, reductions, element-wise ops |
 | cuBLASDx / cuFFTDx | Device-side BLAS and FFT (inside your own kernels) |
 | cuSPARSELt | 2:4 structured sparsity for Ampere+ |
@@ -80,12 +82,10 @@ NVIDIA technologies not yet in ComputeEval.
 | Numba CUDA | JIT-compiled CUDA kernels in Python |
 | Warp | Differentiable GPU programming |
 | JAX custom kernels | Pallas, custom_call, XLA integration |
-| CUTLASS Python DSL | Python-based kernel authoring via cutlass.emit |
 
 ### Problem shapes
 
 | Shape | Description |
 |-------|-------------|
 | Optimization | Given correct code, make it faster |
-| Repair | Given broken code, find and fix the defect |
 | Translation | Given working code, port it to a different API, language, or architecture |

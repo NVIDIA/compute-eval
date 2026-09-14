@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026.2
+
+### Dataset
+
+- **591 problems** (up from 566), now organized into 9 domain groups (up from 7)
+- Added **CUTLASS** group (10 problems): CUTLASS C++ templates, collectives, schedulers, epilogues, and integration patterns
+- Added **CuTe DSL** group (15 problems): CuTe DSL layouts, tensors, copy/MMA atoms, pipelines, and custom kernels
+- Introduced **repair** problems — 14 of the new problems supply a defective or under-performing implementation to fix, rather than a blank slate. Every prior problem is a generation task.
+- The new groups pin their evaluation stack: CUDA Toolkit 13.1 with CUTLASS 4.6.1 (C++) and `nvidia-cutlass-dsl` 4.6.1 (Python)
+
+### Evaluation Harness
+
+- Added an opt-in **Compute Sanitizer** gate (`--sanitizer_mode`): run `memcheck`, `racecheck`, `synccheck`, and `initcheck` — individually, as a subset, or `all` — before benchmarking. Disabled by default. Any finding, including racecheck warnings, fails the gate; every selected tool still runs so the graded result carries a complete diagnostic record. Results are reported per-solution in a new `sanitizer_result` field on graded solutions.
+- Sanitizer runs require the problem's held-out test to confirm it exercised the intended workload, via the `COMPUTE_EVAL_SANITIZER_REPORT` / `COMPUTE_EVAL_SANITIZER_TOKEN` side channel. Problems that do not implement it report `invalid` rather than a false clean result: their correctness result is preserved, but benchmarking is blocked.
+- Added the optional `base_image` field to problem specs: a problem can name the container image it is evaluated in, overriding the default. Honored by the Podman evaluator; ignored by the local evaluator.
+- Replaced the Docker evaluator with **Podman** (`--mode=podman`, the recommended mode)
+- Fixed CUPTI profiler under-counting of kernels in anonymous namespaces
+- Restructured for PyPI: split `eval` / `gen` extras, moved evaluation code under `compute_eval/evaluation/`
+- Ship a pure-Python wheel; the CUPTI profiler is now built on demand
+- Default evaluation image resolves to `localhost/compute-eval:<CTK_VERSION>`
+
+### Packaging
+
+- **Breaking:** minimum Python is now **3.12** (was 3.10)
+- New CLI entry points: `compute_eval_generate`, `compute_eval_harness`, and
+  `compute_eval_build_profiler` (previously a single `compute_eval` command)
+
+### Generation
+
+- Added **agent-based generation**: `compute_eval_harness harbor generate` runs a coding agent
+  (`claude-code` or `opencode`) against each problem in a sandboxed container, so the model can read
+  files, compile, and iterate rather than answering a single prompt. Per-run token usage and full
+  agent trajectories are written alongside the solutions datapack.
+- Added `harbor optimize`, which starts the agent from the known-good baseline solution with full
+  problem context and scores it on speedup rather than initial correctness
+- Replaced the zero-shot generator with a unified few-shot/zero-shot generator. `compute_eval_generate`
+  is retained as a zero-shot alias; `compute_eval_harness` adds `--num_shots` / `--demonstrations_dir`,
+  raw text-completion endpoints (`--api_mode completion`), and custom stop sequences.
+
+---
+
 ## 2026.1
 
 ### Dataset

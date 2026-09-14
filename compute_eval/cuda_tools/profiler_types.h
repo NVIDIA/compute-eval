@@ -19,8 +19,8 @@ struct KernelInvocation {
 struct KernelStats {
     std::string demangled_name;
     std::vector<KernelInvocation> invocations;
-    uint64_t total_duration_ns;
-    size_t count;
+    uint64_t total_duration_ns = 0;  // default-init so a fresh map entry is zeroed
+    size_t count = 0;                // (do NOT rely on a name-based first-use guard)
 };
 
 // Individual memory copy record
