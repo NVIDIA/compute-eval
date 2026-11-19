@@ -19,6 +19,11 @@
 #   podman build -f docker/Dockerfile.eval \
 #                -t compute-eval:13.1.0 .
 #
+#   # Grader image for exported Harbor tasks (compute_eval.harbor.export): the
+#   # same toolchain plus the packages compute-eval's grader imports, in /opt/grader-venv:
+#   docker build -f docker/Dockerfile.eval --target grader \
+#                -t compute-eval-grader:13.1.0 .
+#
 #   # Override CUDA / cuDNN versions:
 #   podman build -f docker/Dockerfile.eval \
 #                --build-arg CUDA_VERSION=12.8.0 \
@@ -44,7 +49,7 @@ ARG CUTLASS_VERSION=4.6.1
 ARG CUTLASS_GIT_SHA=e05f953a5b3d38adc240df2ff928e0421c2abba3
 
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
-FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS eval
 
 ARG CUDA_VERSION
 ARG CUDNN_VERSION
@@ -176,3 +181,37 @@ RUN python --version && \
     echo "✓ Unified environment ready"
 
 CMD ["/bin/bash"]
+
+# =============================================================================
+# grader — the eval image plus the packages compute-eval's grader imports
+# =============================================================================
+# Exported Harbor tasks (compute_eval/harbor/export.py) run tests/test.sh in this
+# image, in a fresh sandbox. The grader's code arrives in tests/; test.sh runs it
+# with /opt/grader-venv/bin/python. The agent works in this image too, so
+# compute-eval itself is not installed, and /opt/cuda-python-venv stays first on
+# PATH for the problems' own build and test commands.
+FROM eval AS grader
+
+# tree-sitter-language-pack downloads grammars on first use. Fetch them now, so
+# grading needs no network.
+ENV TREE_SITTER_LANGUAGE_PACK_CACHE_DIR=/opt/tree-sitter-language-pack-cache
+
+# The source is only here to list the dependencies, fetch the grammars and check
+# that the grader starts; it is removed in the same step.
+COPY pyproject.toml /tmp/compute-eval-src/
+COPY compute_eval /tmp/compute-eval-src/compute_eval
+
+RUN uv venv --python /usr/bin/python3 /opt/grader-venv && \
+    uv pip install --no-cache --python /opt/grader-venv/bin/python \
+        -r /tmp/compute-eval-src/pyproject.toml --extra eval && \
+    cd /tmp/compute-eval-src && \
+    /opt/grader-venv/bin/python -c \
+        "from compute_eval.utils.parsing import ALL_LANGUAGES; [language.get_parser() for language in ALL_LANGUAGES]" && \
+    chmod -R a+rX /opt/tree-sitter-language-pack-cache && \
+    /opt/grader-venv/bin/python -m compute_eval.harbor.grade --help > /dev/null && \
+    cd / && rm -rf /tmp/compute-eval-src
+
+# =============================================================================
+# Default target: the plain eval image (unchanged for Podman and CI builds)
+# =============================================================================
+FROM eval

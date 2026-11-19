@@ -39,6 +39,18 @@ _RACECHECK_SUMMARY_RE = re.compile(
 
 _COVERAGE_REPORT_ENV = "COMPUTE_EVAL_SANITIZER_REPORT"
 _COVERAGE_TOKEN_ENV = "COMPUTE_EVAL_SANITIZER_TOKEN"
+_COVERAGE_UNCONFIRMED_REASON = (
+    "clean; target coverage not confirmed (the problem's hidden test does not implement the coverage report)"
+)
+
+
+def problem_declares_target_coverage(test_files: Sequence[object]) -> bool:
+    """True when a problem's held-out test implements the coverage side channel.
+
+    The declaration comes from the problem's own hidden test files, never from the candidate, so a
+    submission cannot switch a problem from strict to unconfirmed coverage.
+    """
+    return any(_COVERAGE_REPORT_ENV in (getattr(test_file, "content", "") or "") for test_file in test_files)
 
 
 def parse_sanitizer_mode(mode: str | Sequence[str] | None) -> tuple[SanitizerTool, ...]:
@@ -131,6 +143,8 @@ def _read_coverage_report(report_path: Path, expected_token: str) -> tuple[bool,
     except (OSError, json.JSONDecodeError) as error:
         return False, f"target-coverage report is unreadable: {error}"
 
+    if not isinstance(data, dict):
+        return False, "target-coverage report is not a JSON object"
     if data.get("token") != expected_token:
         return False, "target-coverage report token does not match"
     target_launches = data.get("target_launches")
@@ -147,6 +161,8 @@ def _classify_tool_result(
     raw_log_error: str | None,
     coverage_confirmed: bool,
     coverage_error: str | None,
+    coverage_required: bool = True,
+    coverage_report_missing: bool = False,
 ) -> tuple[SanitizerStatus, str | None]:
     error_count = _error_count(tool, raw_log) if raw_log is not None else None
     if error_count is not None and error_count > 0:
@@ -160,6 +176,8 @@ def _classify_tool_result(
     if return_code != 0:
         return SanitizerStatus.INVALID, f"sanitized workload exited with code {return_code}"
     if not coverage_confirmed:
+        if not coverage_required and coverage_report_missing:
+            return SanitizerStatus.PASSED, _COVERAGE_UNCONFIRMED_REASON
         return SanitizerStatus.INVALID, coverage_error or "target coverage was not confirmed"
     return SanitizerStatus.PASSED, None
 
@@ -180,8 +198,15 @@ def run_compute_sanitizer(
     workdir: Path,
     timeout_seconds: float,
     exec_fn: EvaluatorRuntime,
+    require_target_coverage: bool = True,
 ) -> SanitizerResult:
-    """Run selected tools and re-run the direct correctness test after clean results."""
+    """Run selected tools and re-run the direct correctness test after clean results.
+
+    With ``require_target_coverage`` (problems whose hidden test implements the coverage side channel),
+    a missing or bad coverage report makes the run invalid. Without it, a clean run whose hidden test
+    wrote no report passes with ``target_coverage_confirmed=False``; findings still fail, and a report
+    that is present but wrong is still invalid.
+    """
     selected_tools = list(tools)
     artifact_dir = workdir / ".compute-eval-sanitizer"
     try:
@@ -225,6 +250,7 @@ def run_compute_sanitizer(
         wall_seconds = time.monotonic() - started
 
         raw_log, raw_log_sha256, raw_log_error = _read_raw_logs(artifact_dir, tool)
+        coverage_report_missing = not host_coverage_report.exists()
         coverage_confirmed, coverage_error = _read_coverage_report(host_coverage_report, coverage_token)
         status, reason = _classify_tool_result(
             tool,
@@ -234,6 +260,8 @@ def run_compute_sanitizer(
             raw_log_error,
             coverage_confirmed,
             coverage_error,
+            coverage_required=require_target_coverage,
+            coverage_report_missing=coverage_report_missing,
         )
         tool_results.append(
             SanitizerToolResult(
@@ -298,10 +326,12 @@ def run_compute_sanitizer(
             post_test_timed_out=False,
         )
 
+    unconfirmed = [result.tool.value for result in tool_results if not result.target_coverage_confirmed]
     return SanitizerResult(
         status=SanitizerStatus.PASSED,
         selected_tools=selected_tools,
         tool_results=tool_results,
+        reason=(f"clean; target coverage not confirmed for: {', '.join(unconfirmed)}" if unconfirmed else None),
         post_test_output=post_output,
         post_test_return_code=post_return_code,
         post_test_timed_out=False,

@@ -1,6 +1,6 @@
 [project]
 name = "nvidia-compute-eval"
-version = "2026.2"
+version = "2026.2.1"
 description = "Library for evaluating Large Language Models on CUDA code"
 readme = "README.md"
 authors = [
@@ -29,7 +29,7 @@ gen = [
     "tqdm>=4.67.1",
     "fire>=0.7.1",
     "pyyaml>=6.0",
-    "harbor==0.20.0",
+    "harbor==0.25.0",
     "litellm>=1.83.14",
     "nvidia-ml-py>=12.560.30",
     "psutil>=6.0.0",
@@ -40,13 +40,14 @@ all = [
 ]
 
 # Note: CLI entry points require the matching optional extra installed
-# compute_eval requires nvidia-compute-eval[eval]
+# compute_eval and compute_eval_harbor_export require nvidia-compute-eval[eval]
 # compute_eval_generate and compute_eval_harness require nvidia-compute-eval[gen]
 [project.scripts]
 compute_eval = "compute_eval.evaluation.cli:main"
 compute_eval_generate = "compute_eval.generation.cli:main"
 compute_eval_harness = "compute_eval.main:main"
 compute_eval_build_profiler = "compute_eval.cuda_tools.build:main"
+compute_eval_harbor_export = "compute_eval.harbor.export:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -54,7 +55,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["compute_eval"]
-exclude = ["compute_eval/internal", "compute_eval/generation/internal"]
+exclude = [
+    "compute_eval/internal",
+    "compute_eval/generation/internal",
+    "compute_eval/evaluation/evaluators/internal",
+]
 
 [dependency-groups]
 dev = [

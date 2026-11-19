@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026.2.1
+
+Code-only release; no dataset changes.
+
+### Evaluation Harness
+
+- Added `compute_eval_harbor_export`: export problems as self-grading Harbor tasks
+- Added `grader` target to `docker/Dockerfile.eval` for exported Harbor tasks
+- Compute Sanitizer: clean runs on problems without the coverage report now pass with `target_coverage_confirmed: false` instead of `invalid`
+- Fixed evaluator crash on a non-object sanitizer coverage report
+- Clearer errors for missing source references
+
+### Packaging
+
+- `harbor` pinned to `0.25.0`
+
+---
+
 ## 2026.2
 
 ### Dataset

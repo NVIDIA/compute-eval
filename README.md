@@ -718,13 +718,13 @@ Selected tools always run in the order `memcheck`, `racecheck`, `synccheck`, `in
 
 The sanitizer gate applies to submitted solutions only. Timing baselines still run their normal correctness and benchmark commands; gold/baseline sanitation belongs in corpus authoring and release validation rather than being repeated for every grading run.
 
-To report a clean sanitizer result, the hidden test must also prove that it exercised the intended workload. During each sanitized run, ComputeEval provides `COMPUTE_EVAL_SANITIZER_REPORT` and `COMPUTE_EVAL_SANITIZER_TOKEN` to the hidden test. After confirming the target launches, the hidden test writes JSON to the report path:
+A problem's hidden test can also report that it exercised the intended workload. During each sanitized run, ComputeEval provides `COMPUTE_EVAL_SANITIZER_REPORT` and `COMPUTE_EVAL_SANITIZER_TOKEN` to the hidden test. After confirming the target launches, the hidden test writes JSON to the report path:
 
 ```json
 {"token": "<value from COMPUTE_EVAL_SANITIZER_TOKEN>", "target_launches": 1}
 ```
 
-The hidden harness should not pass either variable to candidate-controlled child processes. Candidate stdout is never accepted as coverage proof. Problems that do not yet implement this side channel receive an `invalid` sanitizer result rather than a false clean result: their ordinary correctness result is preserved, but performance benchmarking remains blocked. Missing or malformed coverage, missing sanitizer summaries or logs, and timeouts are all invalid runs. After every tool passes, ComputeEval reruns the normal correctness test before benchmarking.
+The hidden harness should not pass either variable to candidate-controlled child processes. Candidate stdout is never accepted as coverage proof. ComputeEval checks the problem's hidden test files for references to `COMPUTE_EVAL_SANITIZER_REPORT`. If any file references it, a missing or malformed report makes the run `invalid` and blocks benchmarking. Otherwise, a run with no sanitizer findings passes with `target_coverage_confirmed: false`, and benchmarking continues. In both cases, sanitizer findings fail the gate. Missing sanitizer summaries or logs, a non-zero sanitizer exit, and timeouts make the run `invalid`. After every tool passes, ComputeEval reruns the normal correctness test before benchmarking.
 
 #### Performance Profiling
 

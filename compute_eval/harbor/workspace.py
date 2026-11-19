@@ -12,6 +12,10 @@ def safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-_.") or "item"
 
 
+def compute_eval_instruction(problem: Problem) -> str:
+    return f"{problem.prompt}\n\nBuild command:\n{problem.build_command}\n"
+
+
 def write_problem_workspace(problem: Problem, workspace: Path) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     for source_file in problem.context_files:
@@ -80,6 +84,10 @@ def collect_solution(
     datapack. Remaining files are dropped when byte-identical to a known original:
     context_files plus any extra_originals (optimize mode passes the baseline solution
     here so an unmodified baseline is not re-emitted).
+
+    A FileSolution cannot record a deletion: a context file the agent deleted is simply absent here,
+    and the evaluator writes it back. The Harbor grader (compute_eval.harbor.grade) drops such files
+    from the problem before it grades.
     """
     original_files = _original_file_map(problem.context_files)
     original_files.update(_original_file_map(list(extra_originals)))

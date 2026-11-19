@@ -16,7 +16,11 @@ from compute_eval.data.data_model import (
 )
 from compute_eval.data.metrics_data_model import CustomTimingMode, PerformanceMetrics
 from compute_eval.evaluation.profilers import PerformanceProfiler
-from compute_eval.evaluation.sanitizer import DEFAULT_SANITIZER_TIMEOUT_SECONDS, run_compute_sanitizer
+from compute_eval.evaluation.sanitizer import (
+    DEFAULT_SANITIZER_TIMEOUT_SECONDS,
+    problem_declares_target_coverage,
+    run_compute_sanitizer,
+)
 from compute_eval.utils.eval_utils import GpuInfo, parse_semver
 from compute_eval.utils.parsing import get_most_likely_language
 
@@ -35,13 +39,18 @@ def resolve_workspace_path(work_dir: Path, file_path: str) -> Path:
     return target_path
 
 
-def verify_source_references(
+def find_missing_source_references(
     solution: Solution,
     source_references: str | list[str] | SourceReferences | None,
-) -> bool:
-    """Check that solution files contain all required source references."""
+) -> list[str]:
+    """Return the required API symbols that the solution files do not use.
+
+    Symbols from an ``all`` list are returned individually when absent. If none
+    of the symbols from an ``any`` list are present, every ``any`` symbol is
+    returned so the message can show what would have satisfied the check.
+    """
     if source_references is None or not isinstance(solution, FileSolution):
-        return True
+        return []
 
     all_refs: list[str] = []
     any_refs: list[str] = []
@@ -57,7 +66,7 @@ def verify_source_references(
             any_refs = source_references.any
 
     if not all_refs and not any_refs:
-        return True
+        return []
 
     all_remaining = {ref.encode(SOURCE_ENCODING) for ref in all_refs}
     any_remaining = {ref.encode(SOURCE_ENCODING) for ref in any_refs}
@@ -71,9 +80,37 @@ def verify_source_references(
                 if ref in any_remaining:
                     any_remaining.clear()
                 if not all_remaining and not any_remaining:
-                    return True
+                    return []
 
-    return not all_remaining and not any_remaining
+    missing = [ref for ref in all_refs if ref.encode(SOURCE_ENCODING) in all_remaining]
+    if any_remaining:
+        missing.extend(any_refs)
+    return missing
+
+
+def format_missing_source_references(
+    missing: list[str],
+    source_references: str | list[str] | SourceReferences | None,
+) -> str:
+    """Build a failure message that names the required API symbols the solution did not use."""
+    any_refs: list[str] = []
+    if isinstance(source_references, SourceReferences) and source_references.any is not None:
+        any_refs = source_references.any
+
+    any_missing = [ref for ref in missing if ref in any_refs]
+    all_missing = [ref for ref in missing if ref not in any_refs]
+
+    parts: list[str] = []
+    if all_missing:
+        parts.append("must use " + ", ".join(f"`{ref}`" for ref in all_missing))
+    if any_missing:
+        parts.append("must use at least one of " + ", ".join(f"`{ref}`" for ref in any_missing))
+
+    return (
+        "[VALIDATION ERROR] Solution does not use a required API: solution "
+        + " and ".join(parts)
+        + ". The required API must be called, not reimplemented."
+    )
 
 
 @contextmanager
@@ -289,15 +326,17 @@ class SolutionEvaluator(ABC):
             self._setup_workspace(workdir_path, problem, solution)
 
             # Validate source references before execution
-            if check_source_references and not verify_source_references(solution, problem.source_references):
-                return GradedSolution(
-                    task_id=solution.task_id,
-                    solution=solution,
-                    problem=problem,
-                    passed=False,
-                    skipped=False,
-                    test_output="[VALIDATION ERROR] Solution does not include required source references.",
-                )
+            if check_source_references:
+                missing_refs = find_missing_source_references(solution, problem.source_references)
+                if missing_refs:
+                    return GradedSolution(
+                        task_id=solution.task_id,
+                        solution=solution,
+                        problem=problem,
+                        passed=False,
+                        skipped=False,
+                        test_output=format_missing_source_references(missing_refs, problem.source_references),
+                    )
 
             try:
                 exec_fn: EvaluatorRuntime = self.evaluator_runtime(workdir_path)
@@ -355,6 +394,7 @@ class SolutionEvaluator(ABC):
                             DEFAULT_SANITIZER_TIMEOUT_SECONDS,
                         ),
                         exec_fn=exec_fn,
+                        require_target_coverage=problem_declares_target_coverage(problem.test_files or []),
                     )
                     if sanitizer_result.status != SanitizerStatus.PASSED:
                         return GradedSolution(

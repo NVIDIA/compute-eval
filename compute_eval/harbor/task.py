@@ -19,6 +19,7 @@ from compute_eval.gpu_lock.scheduler import (
 from compute_eval.harbor.workspace import (
     STEP_NAME,
     WORKDIR,
+    compute_eval_instruction,
     safe_name,
     write_optimize_workspace,
     write_problem_workspace,
@@ -34,10 +35,6 @@ class NvidiaDockerEnvironment(DockerEnvironment):
     @property
     def capabilities(self) -> EnvironmentCapabilities:
         return super().capabilities.model_copy(update={"gpus": True})
-
-
-def compute_eval_instruction(problem: Problem) -> str:
-    return f"{problem.prompt}\n\nBuild command:\n{problem.build_command}\n"
 
 
 def docker_compose_yaml(
